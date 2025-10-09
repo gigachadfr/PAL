@@ -19,8 +19,7 @@ It was originally developed for LLM usage and commentary purposes, but can be us
 
 I created this mod mostly because I saw **catsdontlikecofee**'s videos ([TikTok link](https://www.tiktok.com/@iiillii11iilliill)), and since he hasn’t released his work publicly yet, I decided to make something similar myself.  
 I used AI tools to help build the mod (since I don’t personally know Java), but not the Python script.  
-The main idea was to build something functional for AI/LLM experiments inside Minecraft —  
-to observe and comment on gameplay based on the log.
+The main idea was to build something functional for AI/LLM experiments inside Minecraft to observe and comment on gameplay based on the log.
 
 ---
 
