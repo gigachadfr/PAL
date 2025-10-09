@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "playeractionlogger",
+  "version": "${version}",
+
+  "name": "PAL",
+  "description": "a mod to log player actions on the client side for the purpose of implementation with an LLM",
+  "authors": [
+    "giga_chad_77"
+  ],
+  "contact": {
+    "Discord": "giga_chad_fr"
+  },
+
+  "license": "MIT",
+  "icon": "assets/playeractionlogger/icon.png",
+
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.yourmod.playeractionlogger.PlayerActionLogger"
+    ]
+  },
+  "mixins": [
+    "playeractionlogger.mixins.json"
+  ],
+
+  "depends": {
+    "fabricloader": ">=0.15.3",
+    "minecraft": "1.20.4",
+    "java": ">=17"
+  }
+}
