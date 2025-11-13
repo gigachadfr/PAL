@@ -13,12 +13,15 @@ from dotenv import load_dotenv, set_key
 # ==================== CONFIGURATION ====================
 ENV_FILE = '.env'
 CHAT_HISTORY_DIR = 'chat_history'
+API_KEYS_FILE = 'elevenlabs_keys.json'
 
 class Config:
     """Configuration manager with .env file support"""
     
     def __init__(self):
         self.load_env()
+        self.elevenlabs_keys = self.load_elevenlabs_keys()
+        self.current_key_index = 0
     
     def load_env(self):
         """Load or create .env file"""
@@ -30,10 +33,10 @@ class Config:
         """Create default .env file"""
         defaults = {
             'GEMINI_API_KEY': '',
-            'ELEVENLABS_API_KEY': '',
             'VOICE_ID': '',
             'LOG_DIRECTORY': '',
             'GEMINI_MODEL': 'gemini-2.0-flash',
+            'ELEVENLABS_MODEL': 'eleven_turbo_v2_5',
             'SYSTEM_PROMPT': 'context: Currently you only receive the logs of the users actions, you must act as if you were seeing their Minecraft gameplay directly. personality: you act like a tsundere and react to what the user is doing dont hesitate to trash them when they do something bad',
             'CHECK_INTERVAL': '1',
             'SEND_INTERVAL': '30'
@@ -43,6 +46,73 @@ class Config:
             for key, value in defaults.items():
                 f.write(f'{key}={value}\n')
     
+    def load_elevenlabs_keys(self):
+        """Load ElevenLabs API keys from JSON file"""
+        if not os.path.exists(API_KEYS_FILE):
+            default_keys = {
+                "keys": [],
+                "usage_count": {}
+            }
+            with open(API_KEYS_FILE, 'w') as f:
+                json.dump(default_keys, f, indent=2)
+            return default_keys
+        
+        try:
+            with open(API_KEYS_FILE, 'r') as f:
+                return json.load(f)
+        except:
+            return {"keys": [], "usage_count": {}}
+    
+    def save_elevenlabs_keys(self):
+        """Save ElevenLabs API keys to JSON file"""
+        with open(API_KEYS_FILE, 'w') as f:
+            json.dump(self.elevenlabs_keys, f, indent=2)
+    
+    def add_elevenlabs_key(self, api_key):
+        """Add a new ElevenLabs API key"""
+        if api_key not in self.elevenlabs_keys["keys"]:
+            self.elevenlabs_keys["keys"].append(api_key)
+            self.elevenlabs_keys["usage_count"][api_key] = 0
+            self.save_elevenlabs_keys()
+            print(f"[SUCCESS] API key added successfully!")
+            return True
+        else:
+            print(f"[INFO] This API key already exists.")
+            return False
+    
+    def remove_elevenlabs_key(self, index):
+        """Remove an ElevenLabs API key by index"""
+        if 0 <= index < len(self.elevenlabs_keys["keys"]):
+            key = self.elevenlabs_keys["keys"].pop(index)
+            if key in self.elevenlabs_keys["usage_count"]:
+                del self.elevenlabs_keys["usage_count"][key]
+            self.save_elevenlabs_keys()
+            print(f"[SUCCESS] API key removed successfully!")
+            return True
+        return False
+    
+    def get_current_elevenlabs_key(self):
+        """Get current ElevenLabs API key"""
+        if not self.elevenlabs_keys["keys"]:
+            return None
+        return self.elevenlabs_keys["keys"][self.current_key_index]
+    
+    def switch_to_next_key(self):
+        """Switch to next available API key"""
+        if len(self.elevenlabs_keys["keys"]) <= 1:
+            print("[WARNING] No other API keys available!")
+            return False
+        
+        self.current_key_index = (self.current_key_index + 1) % len(self.elevenlabs_keys["keys"])
+        print(f"[SWITCH] Switched to API key #{self.current_key_index + 1}")
+        return True
+    
+    def increment_usage(self, api_key):
+        """Increment usage count for an API key"""
+        if api_key in self.elevenlabs_keys["usage_count"]:
+            self.elevenlabs_keys["usage_count"][api_key] += 1
+            self.save_elevenlabs_keys()
+    
     def get(self, key, default=''):
         return os.getenv(key, default)
     
@@ -51,8 +121,9 @@ class Config:
         os.environ[key] = value
     
     def is_configured(self):
-        required = ['GEMINI_API_KEY', 'ELEVENLABS_API_KEY', 'VOICE_ID', 'LOG_DIRECTORY']
-        return all(self.get(key) for key in required)
+        required = ['GEMINI_API_KEY', 'VOICE_ID', 'LOG_DIRECTORY']
+        has_elevenlabs = len(self.elevenlabs_keys["keys"]) > 0
+        return all(self.get(key) for key in required) and has_elevenlabs
 
 
 # ==================== CHAT HISTORY MANAGER ====================
@@ -197,21 +268,33 @@ class AIHandler:
         except Exception as e:
             print(f"[ERROR] Error in send_message(): {e}")
     
-    def _synthesize_and_play(self, text):
+    def _synthesize_and_play(self, text, retry_count=0):
         """Synthesize text to speech and play"""
-        print(f"[ELEVENLABS] Synthesizing speech...")
+        max_retries = len(self.config.elevenlabs_keys["keys"])
+        
+        if retry_count >= max_retries:
+            print("[ERROR] All API keys failed!")
+            return
+        
+        api_key = self.config.get_current_elevenlabs_key()
+        
+        if not api_key:
+            print("[ERROR] No ElevenLabs API key available!")
+            return
+        
+        print(f"[ELEVENLABS] Synthesizing speech... (Key #{self.config.current_key_index + 1})")
         
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.config.get('VOICE_ID')}"
         
         headers = {
             "Accept": "audio/mpeg",
             "Content-Type": "application/json",
-            "xi-api-key": self.config.get('ELEVENLABS_API_KEY')
+            "xi-api-key": api_key
         }
         
         data = {
             "text": text,
-            "model_id": "eleven_turbo_v2_5",
+            "model_id": self.config.get('ELEVENLABS_MODEL'),
             "voice_settings": {
                 "stability": 0.5,
                 "similarity_boost": 0.5
@@ -222,6 +305,9 @@ class AIHandler:
             response = requests.post(url, json=data, headers=headers)
             
             if response.status_code == 200:
+                # Increment usage count
+                self.config.increment_usage(api_key)
+                
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
                     tmp_file.write(response.content)
                     mp3_path = tmp_file.name
@@ -232,9 +318,21 @@ class AIHandler:
                 print(f"[SUCCESS] Audio played successfully!\n")
             else:
                 print(f"[ERROR] ElevenLabs error: {response.status_code} - {response.text}")
+                
+                # Switch to next key and retry
+                if self.config.switch_to_next_key():
+                    print("[RETRY] Retrying with next API key...")
+                    time.sleep(1)
+                    self._synthesize_and_play(text, retry_count + 1)
         
         except Exception as e:
             print(f"[ERROR] Error synthesizing speech: {e}")
+            
+            # Switch to next key and retry
+            if self.config.switch_to_next_key():
+                print("[RETRY] Retrying with next API key...")
+                time.sleep(1)
+                self._synthesize_and_play(text, retry_count + 1)
     
     def _play_audio(self, file_path):
         """Play audio file based on OS"""
@@ -273,15 +371,26 @@ class SetupWizard:
         print("INITIAL SETUP")
         print("=" * 60)
         
-        # API Keys
+        # Gemini API Key
         if not self.config.get('GEMINI_API_KEY'):
             api_key = input("Enter your Gemini API Key: ").strip()
             self.config.set('GEMINI_API_KEY', api_key)
         
-        if not self.config.get('ELEVENLABS_API_KEY'):
-            api_key = input("Enter your ElevenLabs API Key: ").strip()
-            self.config.set('ELEVENLABS_API_KEY', api_key)
+        # ElevenLabs API Keys
+        if len(self.config.elevenlabs_keys["keys"]) == 0:
+            print("\n[INFO] You need at least one ElevenLabs API key")
+            while True:
+                api_key = input("Enter an ElevenLabs API Key: ").strip()
+                if api_key:
+                    self.config.add_elevenlabs_key(api_key)
+                    
+                    add_more = input("Add another API key? (y/n): ").strip().lower()
+                    if add_more != 'y':
+                        break
+                else:
+                    break
         
+        # Voice ID
         if not self.config.get('VOICE_ID'):
             voice_id = input("Enter your ElevenLabs Voice ID: ").strip()
             self.config.set('VOICE_ID', voice_id)
@@ -293,35 +402,136 @@ class SetupWizard:
         
         print("\n[SUCCESS] Initial setup complete!")
     
+    def manage_api_keys(self):
+        """Manage API keys"""
+        while True:
+            print("\n" + "=" * 60)
+            print("API KEY MANAGEMENT")
+            print("=" * 60)
+            
+            # Gemini API Key
+            print("\n[GEMINI API KEY]")
+            current_gemini = self.config.get('GEMINI_API_KEY')
+            if current_gemini:
+                print(f"Current: {current_gemini[:20]}...{current_gemini[-10:]}")
+            else:
+                print("Current: Not set")
+            
+            # ElevenLabs API Keys
+            print("\n[ELEVENLABS API KEYS]")
+            if self.config.elevenlabs_keys["keys"]:
+                for i, key in enumerate(self.config.elevenlabs_keys["keys"]):
+                    usage = self.config.elevenlabs_keys["usage_count"].get(key, 0)
+                    marker = " <- CURRENT" if i == self.config.current_key_index else ""
+                    print(f"{i + 1}. {key[:20]}...{key[-10:]} (Used: {usage} times){marker}")
+            else:
+                print("No API keys configured")
+            
+            print("\n[OPTIONS]")
+            print("1. Change Gemini API Key")
+            print("2. Add ElevenLabs API Key")
+            print("3. Remove ElevenLabs API Key")
+            print("4. Back to main menu")
+            
+            choice = input("\nSelect option (1-4): ").strip()
+            
+            if choice == '1':
+                new_key = input("Enter new Gemini API Key: ").strip()
+                if new_key:
+                    self.config.set('GEMINI_API_KEY', new_key)
+                    print("[SUCCESS] Gemini API Key updated!")
+            
+            elif choice == '2':
+                new_key = input("Enter new ElevenLabs API Key: ").strip()
+                if new_key:
+                    self.config.add_elevenlabs_key(new_key)
+            
+            elif choice == '3':
+                if not self.config.elevenlabs_keys["keys"]:
+                    print("[ERROR] No API keys to remove!")
+                    continue
+                
+                try:
+                    index = int(input("Enter key number to remove: ").strip()) - 1
+                    self.config.remove_elevenlabs_key(index)
+                except ValueError:
+                    print("[ERROR] Invalid input!")
+            
+            elif choice == '4':
+                break
+    
     def show_advanced_settings(self):
         """Show and edit advanced settings"""
-        print("\n" + "=" * 60)
-        print("ADVANCED SETTINGS")
-        print("=" * 60)
-        print("1. Gemini Model:", self.config.get('GEMINI_MODEL'))
-        print("2. System Prompt:", self.config.get('SYSTEM_PROMPT')[:50] + "...")
-        print("3. Check Interval:", self.config.get('CHECK_INTERVAL'), "seconds")
-        print("4. Send Interval:", self.config.get('SEND_INTERVAL'), "seconds")
-        print("5. Back to main menu")
-        
-        choice = input("\nSelect option to edit (1-5): ").strip()
-        
-        if choice == '1':
-            model = input("Enter Gemini model name: ").strip()
-            if model:
-                self.config.set('GEMINI_MODEL', model)
-        elif choice == '2':
-            prompt = input("Enter system prompt: ").strip()
-            if prompt:
-                self.config.set('SYSTEM_PROMPT', prompt)
-        elif choice == '3':
-            interval = input("Enter check interval (seconds): ").strip()
-            if interval.isdigit():
-                self.config.set('CHECK_INTERVAL', interval)
-        elif choice == '4':
-            interval = input("Enter send interval (seconds): ").strip()
-            if interval.isdigit():
-                self.config.set('SEND_INTERVAL', interval)
+        while True:
+            print("\n" + "=" * 60)
+            print("ADVANCED SETTINGS")
+            print("=" * 60)
+            
+            # ElevenLabs Models info
+            models_info = {
+                "eleven_turbo_v2_5": "Turbo V2.5 (Fast) - ~500 chars/req",
+                "eleven_multilingual_v2": "Multilingual V2 - ~1000 chars/req",
+                "eleven_flash_v2_5": "Flash V2.5 (Ultra Fast) - ~250 chars/req",
+                "eleven_v3": "V3 Alpha (Most Expressive) - ~1000 chars/req"
+            }
+            
+            current_model = self.config.get('ELEVENLABS_MODEL')
+            model_display = models_info.get(current_model, current_model)
+            
+            print(f"1. Gemini Model: {self.config.get('GEMINI_MODEL')}")
+            print(f"2. ElevenLabs Model: {model_display}")
+            print(f"3. System Prompt: {self.config.get('SYSTEM_PROMPT')[:50]}...")
+            print(f"4. Check Interval: {self.config.get('CHECK_INTERVAL')} seconds")
+            print(f"5. Send Interval: {self.config.get('SEND_INTERVAL')} seconds")
+            print("6. Back to main menu")
+            
+            choice = input("\nSelect option to edit (1-6): ").strip()
+            
+            if choice == '1':
+                model = input("Enter Gemini model name: ").strip()
+                if model:
+                    self.config.set('GEMINI_MODEL', model)
+                    print("[SUCCESS] Gemini model updated!")
+            
+            elif choice == '2':
+                print("\n[ELEVENLABS MODELS]")
+                print("1. eleven_turbo_v2_5 (Turbo V2.5 - Fast) - ~500 chars/req")
+                print("2. eleven_multilingual_v2 (Multilingual V2) - ~1000 chars/req")
+                print("3. eleven_flash_v2_5 (Flash V2.5 - Ultra Fast) - ~250 chars/req")
+                print("4. eleven_v3 (V3 Alpha - Most Expressive) - ~1000 chars/req")
+                
+                model_choice = input("\nSelect model (1-4): ").strip()
+                models = {
+                    '1': 'eleven_turbo_v2_5',
+                    '2': 'eleven_multilingual_v2',
+                    '3': 'eleven_flash_v2_5',
+                    '4': 'eleven_v3'
+                }
+                
+                if model_choice in models:
+                    self.config.set('ELEVENLABS_MODEL', models[model_choice])
+                    print(f"[SUCCESS] ElevenLabs model updated to {models[model_choice]}!")
+            
+            elif choice == '3':
+                prompt = input("Enter system prompt: ").strip()
+                if prompt:
+                    self.config.set('SYSTEM_PROMPT', prompt)
+                    print("[SUCCESS] System prompt updated!")
+            
+            elif choice == '4':
+                interval = input("Enter check interval (seconds): ").strip()
+                if interval.isdigit():
+                    self.config.set('CHECK_INTERVAL', interval)
+                    print("[SUCCESS] Check interval updated!")
+            
+            elif choice == '5':
+                interval = input("Enter send interval (seconds): ").strip()
+                if interval.isdigit():
+                    self.config.set('SEND_INTERVAL', interval)
+                    print("[SUCCESS] Send interval updated!")
+            
+            elif choice == '6':
+                break
 
 
 # ==================== MAIN APPLICATION ====================
@@ -351,16 +561,19 @@ class MinecraftAICommentator:
             print("MAIN MENU")
             print("=" * 60)
             print("1. Start AI Commentator")
-            print("2. Configure Settings")
-            print("3. Exit")
+            print("2. Manage API Keys")
+            print("3. Advanced Settings")
+            print("4. Exit")
             
-            choice = input("\nSelect option (1-3): ").strip()
+            choice = input("\nSelect option (1-4): ").strip()
             
             if choice == '1':
                 self._start_commentator()
             elif choice == '2':
-                self.wizard.show_advanced_settings()
+                self.wizard.manage_api_keys()
             elif choice == '3':
+                self.wizard.show_advanced_settings()
+            elif choice == '4':
                 print("\n[EXIT] Goodbye!")
                 break
     
