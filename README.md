@@ -15,6 +15,8 @@ if you made video with it please credit this project
 - **Main Goal:** Provide a simple way to record player actions for use with AI scripts or analysis tools.  
 - **Python Script:** This repository also includes a companion script, `ai_minecraft_bot.py`, designed to read the log and interact with the game (Gemini and ElevenLabs API keys are required) — though the mod can be used independently.
 
+![log screen](https://github.com/gigachadfr/PAL/blob/main/screen/exemple.png?raw=true)
+
 ---
 
 ## 💡 Why I Made This
