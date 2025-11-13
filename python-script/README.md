@@ -15,9 +15,9 @@ An AI-powered commentator bot that watches your Minecraft gameplay logs and prov
 ## Prerequisites
 
 - Python 3.8 or higher
-- Minecraft with logging enabled
+- Minecraft 1.20.4 with the playeractionlogger mod or any mod that do a transcript with the same format
 - Google Gemini API key
-- ElevenLabs API key and Voice ID
+- ElevenLabs API key(you can add as many as you want) and Voice ID
 
 ## Getting API Keys
 
@@ -41,7 +41,7 @@ An AI-powered commentator bot that watches your Minecraft gameplay logs and prov
    - Choose a voice or create your own
    - Click on the voice and copy the Voice ID from the URL or settings
 
-**Note:** Free tier includes 10,000 characters per month.
+**Note:** Free tier only includes 10,000 characters per month.
 
 ## Configuration
 
@@ -57,14 +57,18 @@ On first run, the application will guide you through an interactive setup wizard
 You can customize:
 
 - **Gemini Model** - Default: `gemini-2.0-flash`
+- **ElevenLabs Model** - Default: `Turbo V2.5`
 - **System Prompt** - Customize the AI's personality and behavior
 - **Check Interval** - How often to check for log changes (seconds)
 - **Send Interval** - Auto-send interval for updates (seconds)
+
+- **Multiple Eleven Labs API keys** - change when the current one is not working
 
 ## Usage
 
 1. Run the application:
    ```bash
+   pip install requirements.txt
    python ai_minecraft_bot.py
    ```
 
@@ -127,16 +131,6 @@ The application supports audio playback on:
 **Tsundere Commentator** (default):
 ```
 context: Currently you only receive the logs of the users actions, you must act as if you were seeing their Minecraft gameplay directly. personality: you act like a tsundere and react to what the user is doing dont hesitate to trash them when they do something bad
-```
-
-**Encouraging Coach**:
-```
-You are a supportive Minecraft coach watching the player's actions through logs. Provide encouraging commentary, helpful tips, and celebrate their achievements. Keep responses concise and energetic.
-```
-
-**Documentary Narrator**:
-```
-You are David Attenborough narrating a nature documentary, but about Minecraft gameplay. Describe the player's actions in a dramatic, nature-documentary style based on their game logs.
 ```
 
 ## License
