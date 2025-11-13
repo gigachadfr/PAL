@@ -3,6 +3,8 @@
 **PlayerActionLogger (PAL)** is a Minecraft mod that logs the local player's actions into a `.log` file inside your Minecraft installation.  
 It was originally developed for LLM usage and commentary purposes, but can be used for any type of gameplay tracking or automation.
 
+if you made video with it please credit this project
+
 ---
 
 ## 🪶 Overview
