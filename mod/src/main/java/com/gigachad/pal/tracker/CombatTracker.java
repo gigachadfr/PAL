@@ -4,9 +4,9 @@ import com.gigachad.pal.PlayerActionLogger;
 import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
 import com.gigachad.pal.util.Names;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -34,12 +34,12 @@ public class CombatTracker implements Tracker {
     private long lastKillTime;
 
     @Override
-    public void onSessionStart(ClientPlayerEntity player, EventLog log) {
+    public void onSessionStart(LocalPlayer player, EventLog log) {
         recentlyHit.clear();
         pendingKills.clear();
     }
 
-    /** Called from {@code ClientPlayerInteractionManagerMixin} when the player swings at something. */
+    /** Called from {@code MultiPlayerGameModeMixin} when the player swings at something. */
     public void onAttack(Entity target) {
         long now = System.currentTimeMillis();
         recentlyHit.put(target.getId(), now);
@@ -70,7 +70,7 @@ public class CombatTracker implements Tracker {
         String path = Names.entityPath(entity);
         String name = Names.readable(entity);
 
-        if (entity instanceof PlayerEntity) {
+        if (entity instanceof Player) {
             log.log(Level.NOTABLE, "player_kill",
                     String.format("Killed player %s.", entity.getName().getString()));
             return;
@@ -86,7 +86,7 @@ public class CombatTracker implements Tracker {
     }
 
     @Override
-    public void tick(ClientPlayerEntity player, EventLog log, long tick) {
+    public void tick(LocalPlayer player, EventLog log, long tick) {
         if (pendingKills.isEmpty() || tick % 20 != 0) return;
         if (System.currentTimeMillis() - lastKillTime < BATCH_IDLE_MS) return;
         flush(log);

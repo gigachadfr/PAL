@@ -2,11 +2,11 @@ package com.gigachad.pal.mixin;
 
 import com.gigachad.pal.PlayerActionLogger;
 import com.gigachad.pal.util.Names;
-import net.minecraft.advancement.AdvancementEntry;
-import net.minecraft.client.toast.AdvancementToast;
-import net.minecraft.client.toast.Toast;
-import net.minecraft.client.toast.ToastManager;
-import net.minecraft.util.Identifier;
+import net.minecraft.advancements.AdvancementHolder;
+import net.minecraft.client.gui.components.toasts.AdvancementToast;
+import net.minecraft.client.gui.components.toasts.Toast;
+import net.minecraft.client.gui.components.toasts.ToastManager;
+import net.minecraft.resources.Identifier;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -22,11 +22,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 @Mixin(ToastManager.class)
 public class ToastManagerMixin {
 
-    @Inject(method = "add", at = @At("HEAD"))
+    @Inject(method = "addToast", at = @At("HEAD"))
     private void pal$onToast(Toast toast, CallbackInfo ci) {
         if (!(toast instanceof AdvancementToast advancementToast)) return;
 
-        AdvancementEntry entry = ((AdvancementToastAccessor) advancementToast).pal$getAdvancement();
+        AdvancementHolder entry = ((AdvancementToastAccessor) advancementToast).pal$getAdvancement();
         if (entry == null) return;
 
         Identifier id = entry.id();

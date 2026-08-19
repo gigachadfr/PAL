@@ -1,7 +1,7 @@
 package com.gigachad.pal.mixin;
 
-import net.minecraft.advancement.AdvancementEntry;
-import net.minecraft.client.toast.AdvancementToast;
+import net.minecraft.advancements.AdvancementHolder;
+import net.minecraft.client.gui.components.toasts.AdvancementToast;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.gen.Accessor;
 
@@ -10,5 +10,5 @@ import org.spongepowered.asm.mixin.gen.Accessor;
 public interface AdvancementToastAccessor {
 
     @Accessor("advancement")
-    AdvancementEntry pal$getAdvancement();
+    AdvancementHolder pal$getAdvancement();
 }

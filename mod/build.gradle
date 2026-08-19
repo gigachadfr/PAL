@@ -1,5 +1,7 @@
 plugins {
-    id 'fabric-loom' version '1.7.4'
+    // MC 26.1 is unobfuscated, so this is the non-remapping Loom plugin: no mappings, no
+    // remapJar, and mods are plain `implementation` dependencies.
+    id 'net.fabricmc.fabric-loom' version '1.17.19'
     id 'maven-publish'
     id 'java'
 }
@@ -11,27 +13,17 @@ repositories {
     // Add repositories to retrieve artifacts from in here.
     // You should only use this when depending on other mods because
     // Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
-    maven { url "https://maven.shedaniel.me/" }
-    maven { url "https://maven.terraformersmc.com/" }
-}
-
-loom {
-    mixin {
-        defaultRefmapName = "playeractionlogger.refmap.json"
-    }
+    maven { url = "https://maven.shedaniel.me/" }
+    maven { url = "https://maven.terraformersmc.com/" }
 }
 
 dependencies {
-    // Minecraft
+    // Minecraft. No `mappings` line: 26.1+ ships with official names and parameter names.
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
     // Fabric API
-    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-    
-    // Gson for JSON handling (included in Minecraft)
-    implementation 'com.google.code.gson:gson:2.10.1'
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 }
 
 processResources {
@@ -43,22 +35,22 @@ processResources {
 }
 
 tasks.withType(JavaCompile).configureEach {
-    it.options.release = 21
+    it.options.release = 25
     it.options.encoding = "UTF-8"
 }
 
 java {
-    // Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
     withSourcesJar()
 
-    // Lets Gradle locate a JDK 21 on its own, whatever JVM Gradle itself runs on.
-    toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
-    }
+    // No toolchain block on purpose: MC 26.1 needs Java 25+, and this machine has 26. Pinning a
+    // toolchain to 25 would make Gradle hunt for a JDK that is not installed; compiling with the
+    // daemon's JVM and `release = 25` targets the right bytecode either way.
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
 }
 
 jar {
     from("LICENSE") {
-        rename { "${it}_${project.archivesBaseName}"}
+        rename { "${it}_${project.archivesBaseName}" }
     }
 }

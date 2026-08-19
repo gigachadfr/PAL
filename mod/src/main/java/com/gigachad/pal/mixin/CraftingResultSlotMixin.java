@@ -1,21 +1,21 @@
 package com.gigachad.pal.mixin;
 
 import com.gigachad.pal.PlayerActionLogger;
-import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.ItemStack;
-import net.minecraft.screen.slot.CraftingResultSlot;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.inventory.ResultSlot;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /** Fires when the player pulls an item out of a crafting result slot. */
-@Mixin(CraftingResultSlot.class)
+@Mixin(ResultSlot.class)
 public class CraftingResultSlotMixin {
 
-    @Inject(method = "onTakeItem", at = @At("HEAD"))
-    private void pal$onCrafted(PlayerEntity player, ItemStack stack, CallbackInfo ci) {
-        if (player.getWorld().isClient()) {
+    @Inject(method = "onTake", at = @At("HEAD"))
+    private void pal$onCrafted(Player player, ItemStack stack, CallbackInfo ci) {
+        if (player.level().isClientSide()) {
             PlayerActionLogger.onCrafted(stack);
         }
     }

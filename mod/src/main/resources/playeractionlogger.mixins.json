@@ -6,7 +6,7 @@
   "mixins": [],
   "client": [
     "AdvancementToastAccessor",
-    "ClientPlayerInteractionManagerMixin",
+    "MultiPlayerGameModeMixin",
     "CraftingResultSlotMixin",
     "DeathScreenMixin",
     "LivingEntityMixin",

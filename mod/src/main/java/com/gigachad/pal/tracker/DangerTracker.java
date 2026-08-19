@@ -3,10 +3,10 @@ package com.gigachad.pal.tracker;
 import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
 import com.gigachad.pal.util.Names;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.entity.mob.CreeperEntity;
-import net.minecraft.entity.mob.HostileEntity;
-import net.minecraft.util.math.Box;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.entity.monster.Creeper;
+import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.phys.AABB;
 
 import java.util.HashMap;
 import java.util.List;
@@ -27,18 +27,18 @@ public class DangerTracker implements Tracker {
     private static final long MOB_THROTTLE_MS = 20_000L;
 
     @Override
-    public void tick(ClientPlayerEntity player, EventLog log, long tick) {
+    public void tick(LocalPlayer player, EventLog log, long tick) {
         if (tick % CHECK_EVERY_TICKS != 0) return;
         if (player.isSpectator() || player.isCreative()) return;
 
         // ---- a creeper about to blow -------------------------------------
-        List<CreeperEntity> creepers = player.clientWorld.getEntitiesByClass(
-                CreeperEntity.class, player.getBoundingBox().expand(CLOSE_RANGE), e -> e.isAlive());
-        for (CreeperEntity creeper : creepers) {
-            if (creeper.getFuseSpeed() > 0) {
+        List<Creeper> creepers = player.level().getEntitiesOfClass(
+                Creeper.class, player.getBoundingBox().inflate(CLOSE_RANGE), e -> e.isAlive());
+        for (Creeper creeper : creepers) {
+            if (creeper.getSwellDir() > 0) {
                 log.logThrottled(Level.CRITICAL, "creeper_fuse",
                         String.format("A Creeper is hissing %.0f blocks away, about to explode.",
-                                Math.sqrt(creeper.squaredDistanceTo(player))),
+                                Math.sqrt(creeper.distanceToSqr(player))),
                         3_000L);
                 break;
             }
@@ -57,20 +57,20 @@ public class DangerTracker implements Tracker {
         }
 
         // ---- hostile mobs closing in -------------------------------------
-        List<HostileEntity> mobs = player.clientWorld.getEntitiesByClass(
-                HostileEntity.class, player.getBoundingBox().expand(AWARE_RANGE), e -> e.isAlive());
+        List<Monster> mobs = player.level().getEntitiesOfClass(
+                Monster.class, player.getBoundingBox().inflate(AWARE_RANGE), e -> e.isAlive());
         if (mobs.isEmpty()) {
             log.resetThrottle("mobs_nearby");
             return;
         }
 
         long close = mobs.stream()
-                .filter(m -> m.squaredDistanceTo(player) < CLOSE_RANGE * CLOSE_RANGE)
+                .filter(m -> m.distanceToSqr(player) < CLOSE_RANGE * CLOSE_RANGE)
                 .count();
         if (close == 0) return;
 
         Map<String, Integer> counts = new HashMap<>();
-        for (HostileEntity mob : mobs) {
+        for (Monster mob : mobs) {
             counts.merge(Names.readable(mob), 1, Integer::sum);
         }
 

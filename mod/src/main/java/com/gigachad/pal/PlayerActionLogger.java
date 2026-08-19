@@ -4,21 +4,21 @@ import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
 import com.gigachad.pal.tracker.*;
 import com.gigachad.pal.util.Names;
-import net.minecraft.entity.damage.DamageSource;
+import net.minecraft.world.damagesource.DamageSource;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents;
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents;
-import net.minecraft.block.BlockState;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.client.network.ServerInfo;
-import net.minecraft.entity.Entity;
-import net.minecraft.item.ItemStack;
-import net.minecraft.screen.ScreenHandler;
-import net.minecraft.server.integrated.IntegratedServer;
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.client.multiplayer.ServerData;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.inventory.AbstractContainerMenu;
+import net.minecraft.client.server.IntegratedServer;
+import net.minecraft.core.BlockPos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,7 +31,7 @@ import java.util.UUID;
  * Everything here runs on the client thread and reads only client-visible state, which is what
  * lets the same code work in singleplayer and on a remote server — and guarantees it only ever
  * logs <em>our</em> player. The previous version routed everything through
- * {@code ServerPlayerEntity} via {@code client.getServer()}, which is null on any real server,
+ * {@code ServerPlayer} via {@code client.getSingleplayerServer()}, which is null on any real server,
  * so it silently logged nothing at all in multiplayer.
  */
 public class PlayerActionLogger implements ClientModInitializer {
@@ -103,25 +103,25 @@ public class PlayerActionLogger implements ClientModInitializer {
 
             // The server echoes our own message straight back, which would log every line the
             // player types twice — once as chat_sent, once as chat_received.
-            ClientPlayerEntity self = MinecraftClient.getInstance().player;
-            if (self != null && sender != null && sender.getId().equals(self.getUuid())) {
+            LocalPlayer self = Minecraft.getInstance().player;
+            if (self != null && sender != null && sender.id().equals(self.getUUID())) {
                 return;
             }
 
-            String who = sender != null ? sender.getName() : "someone";
+            String who = sender != null ? sender.name() : "someone";
             LOG.log(Level.NOTABLE, "chat_received",
                     String.format("%s said in chat: \"%s\"", who, message.getString()));
         });
     }
 
-    private static void startSession(MinecraftClient client) {
-        ClientPlayerEntity player = client.player;
+    private static void startSession(Minecraft client) {
+        LocalPlayer player = client.player;
         if (player == null) return;
 
-        localPlayerUuid = player.getUuid();
-        hostMode = client.isInSingleplayer();
+        localPlayerUuid = player.getUUID();
+        hostMode = client.hasSingleplayerServer();
 
-        LOG.start(player.getGameProfile().getName(), describeWorld(client));
+        LOG.start(player.getGameProfile().name(), describeWorld(client));
         LOGGER.info("Session started ({} mode)", hostMode ? "host, exact events" : "client, inferred events");
         sessionActive = true;
         tickCount = 0L;
@@ -142,11 +142,11 @@ public class PlayerActionLogger implements ClientModInitializer {
         LOG.close();
     }
 
-    private static void onClientTick(MinecraftClient client) {
+    private static void onClientTick(Minecraft client) {
         if (!sessionActive) return;
 
-        ClientPlayerEntity player = client.player;
-        if (player == null || client.world == null) return;
+        LocalPlayer player = client.player;
+        if (player == null || client.level == null) return;
 
         tickCount++;
         for (Tracker tracker : TRACKERS) {
@@ -159,15 +159,15 @@ public class PlayerActionLogger implements ClientModInitializer {
         }
     }
 
-    private static String describeWorld(MinecraftClient client) {
-        if (client.isInSingleplayer()) {
-            IntegratedServer server = client.getServer();
+    private static String describeWorld(Minecraft client) {
+        if (client.hasSingleplayerServer()) {
+            IntegratedServer server = client.getSingleplayerServer();
             return server != null
-                    ? server.getSaveProperties().getLevelName()
+                    ? server.getWorldData().getLevelName()
                     : "a singleplayer world";
         }
-        ServerInfo info = client.getCurrentServerEntry();
-        return info != null ? info.address : "a multiplayer server";
+        ServerData info = client.getCurrentServer();
+        return info != null ? info.ip : "a multiplayer server";
     }
 
     // ---- facade used by the mixins ----------------------------------------
@@ -197,21 +197,21 @@ public class PlayerActionLogger implements ClientModInitializer {
         if (sessionActive) PROGRESS.onAdvancement(title, description, LOG);
     }
 
-    public static void onContainerOpen(ScreenHandler handler) {
-        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+    public static void onContainerOpen(AbstractContainerMenu handler) {
+        LocalPlayer player = Minecraft.getInstance().player;
         if (sessionActive && player != null) CONTAINER.onOpen(handler, player);
     }
 
     public static void onContainerClose() {
-        ClientPlayerEntity player = MinecraftClient.getInstance().player;
+        LocalPlayer player = Minecraft.getInstance().player;
         if (sessionActive && player != null) CONTAINER.onClose(player, LOG);
     }
 
     /** Called with the game's own death message, so the cause is always exact. */
     public static void onDeath(String deathMessage) {
         if (!sessionActive) return;
-        ClientPlayerEntity player = MinecraftClient.getInstance().player;
-        String where = player == null ? "" : String.format(" at Y=%d", player.getBlockPos().getY());
+        LocalPlayer player = Minecraft.getInstance().player;
+        String where = player == null ? "" : String.format(" at Y=%d", player.blockPosition().getY());
         LOG.log(Level.CRITICAL, "death", String.format("DIED: %s%s.", deathMessage, where));
     }
 
@@ -252,10 +252,10 @@ public class PlayerActionLogger implements ClientModInitializer {
 
     /** Turns a DamageSource into something worth reading aloud. */
     private static String describeDamageSource(DamageSource source) {
-        Entity attacker = source.getAttacker();
+        Entity attacker = source.getEntity();
         if (attacker != null) {
             String name = Names.readable(attacker);
-            Entity projectile = source.getSource();
+            Entity projectile = source.getDirectEntity();
             // "a Skeleton" reads better than "an arrow", but mentioning both is clearer still.
             if (projectile != null && projectile != attacker) {
                 return String.format("a %s (%s)", name, Names.readable(projectile));
@@ -263,7 +263,7 @@ public class PlayerActionLogger implements ClientModInitializer {
             return "a " + name;
         }
 
-        return switch (source.getName()) {
+        return switch (source.getMsgId()) {
             case "inWall" -> "suffocation";
             case "cactus" -> "a cactus";
             case "drown" -> "drowning";
@@ -280,7 +280,7 @@ public class PlayerActionLogger implements ClientModInitializer {
             case "lightningBolt" -> "a lightning bolt";
             case "magic" -> "magic";
             case "wither" -> "wither";
-            default -> Names.prettify(source.getName()).toLowerCase();
+            default -> Names.prettify(source.getMsgId()).toLowerCase();
         };
     }
 }

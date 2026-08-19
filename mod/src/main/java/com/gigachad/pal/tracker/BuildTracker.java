@@ -3,9 +3,9 @@ package com.gigachad.pal.tracker;
 import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
 import com.gigachad.pal.util.Names;
-import net.minecraft.block.BlockState;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -27,12 +27,12 @@ public class BuildTracker implements Tracker {
     private int minX, maxX, minY, maxY, minZ, maxZ;
 
     @Override
-    public void onSessionStart(ClientPlayerEntity player, EventLog log) {
+    public void onSessionStart(LocalPlayer player, EventLog log) {
         session.clear();
         active = false;
     }
 
-    /** Called from {@code ClientPlayerInteractionManagerMixin}. */
+    /** Called from {@code MultiPlayerGameModeMixin}. */
     public void onBlockPlaced(BlockState state, BlockPos pos) {
         long now = System.currentTimeMillis();
 
@@ -56,7 +56,7 @@ public class BuildTracker implements Tracker {
     }
 
     @Override
-    public void tick(ClientPlayerEntity player, EventLog log, long tick) {
+    public void tick(LocalPlayer player, EventLog log, long tick) {
         if (!active || tick % 10 != 0) return;
 
         long now = System.currentTimeMillis();

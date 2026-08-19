@@ -4,7 +4,7 @@ import com.gigachad.pal.context.WorldContext;
 import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
 import com.google.gson.JsonObject;
-import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.player.LocalPlayer;
 
 /**
  * Keeps the AI aware of where the player is. Emits a periodic scene line, and calls out the
@@ -29,14 +29,14 @@ public class SceneTracker implements Tracker {
     private long lastEmit;
 
     @Override
-    public void onSessionStart(ClientPlayerEntity player, EventLog log) {
+    public void onSessionStart(LocalPlayer player, EventLog log) {
         last = null;
         lastSeen = null;
         lastEmit = 0L;
     }
 
     @Override
-    public void tick(ClientPlayerEntity player, EventLog log, long tick) {
+    public void tick(LocalPlayer player, EventLog log, long tick) {
         if (tick % CHECK_EVERY_TICKS != 0) return;
 
         WorldContext now = WorldContext.of(player);
