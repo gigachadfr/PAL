@@ -1,15 +1,20 @@
 {
   "required": true,
   "minVersion": "0.8",
-  "package": "com.yourmod.playeractionlogger.mixin",
-  "compatibilityLevel": "JAVA_17",
-  "mixins": [
-    "BlockItemMixin",
+  "package": "com.gigachad.pal.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [],
+  "client": [
+    "AdvancementToastAccessor",
+    "ClientPlayerInteractionManagerMixin",
+    "CraftingResultSlotMixin",
+    "DeathScreenMixin",
     "LivingEntityMixin",
-    "PlayerEntityMixin",
-    "ScreenHandlerMixin"
+    "MinecraftClientMixin",
+    "ServerDamageMixin",
+    "ServerKillMixin",
+    "ToastManagerMixin"
   ],
-  "client": [],
   "injectors": {
     "defaultRequire": 1
   }

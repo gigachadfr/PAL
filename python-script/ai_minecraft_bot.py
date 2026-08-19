@@ -1,697 +1,1441 @@
-import os
-import time
-import requests
-from google import generativeai as genai
-from pathlib import Path
-import tempfile
-import platform
-import subprocess
+"""
+Minecraft AI Commentator — reads the JSONL action log produced by the PAL mod and reacts to it
+out loud via Gemini + ElevenLabs.
+
+Design notes (why it looks like this):
+  * The log is tailed by byte offset and survives being truncated when a new Minecraft session
+    starts. The previous version diffed by line count, so a truncation left it permanently stuck.
+  * Events carry a level (INFO / NOTABLE / CRITICAL) which drives *when* we talk: CRITICAL cuts
+    the queue, NOTABLE debounces so bursts get grouped, INFO waits for the timer.
+  * Audio plays on its own thread, so a 15 s clip no longer blocks log reading.
+"""
+
+import asyncio
 import json
+import os
+import platform
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
 from datetime import datetime
+from pathlib import Path
+
+import requests
 from dotenv import load_dotenv, set_key
 
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:  # pragma: no cover - guidance for a fresh install
+    raise SystemExit(
+        "Missing dependency: google-genai\n"
+        "Install the requirements first:  pip install -r requirements.txt"
+    )
+
+try:
+    import edge_tts
+except ImportError:  # optional: only needed for the free TTS backend
+    edge_tts = None
+
 # ==================== CONFIGURATION ====================
-ENV_FILE = '.env'
-CHAT_HISTORY_DIR = 'chat_history'
-API_KEYS_FILE = 'elevenlabs_keys.json'
+ENV_FILE = ".env"
+CHAT_HISTORY_DIR = "chat_history"
+API_KEYS_FILE = "elevenlabs_keys.json"
+
+LOG_FILE_NAME = "session.log"
+
+# Appended to the user's own system prompt. Keeps replies short enough to be worth speaking,
+# and stops the model from reading out coordinates, which sound terrible as audio.
+FORMAT_RULES = (
+    "\n\nOUTPUT RULES (always follow, they override any style instruction):\n"
+    "- Reply with 1 to 2 short spoken sentences. Never more. No lists, no markdown, no emoji.\n"
+    "- You are being read aloud by a text-to-speech voice. Write how a person talks.\n"
+    "- Never read out raw coordinates or numbers like Y=-54; say 'deep underground' instead.\n"
+    "- React to the most interesting thing that just happened; ignore the routine noise.\n"
+    "- Never describe the log itself or mention that you are reading logs."
+)
+
+# Chatterbox Turbo renders these natively — the syntax is SQUARE brackets, [laugh], as per the
+# model card. Every other backend would read them out loud, so they are stripped there.
+PARALINGUISTIC_TAGS = (
+    "laugh", "chuckle", "sigh", "gasp", "cough", "clear throat", "sniff", "groan", "shush",
+)
+
+PARALINGUISTIC_RULES = (
+    "\n- You may add ONE performance cue per reply, inline, only where it genuinely fits:\n"
+    "  [laugh] [chuckle] [sigh] [gasp] [groan] [cough] [sniff] [shush]\n"
+    '  Example: "[sigh] You walked into the lava. Of course you did."\n'
+    "  Square brackets exactly as shown. Do not invent other tags, do not use more than one,\n"
+    "  and never start every reply with one."
+)
+
+# Matches only the known tags, in either bracket style and singular or plural. Square brackets
+# are the real syntax; angle brackets are matched so a model slip can be repaired rather than
+# spoken. Anything else in brackets is left alone.
+_TAG_ALTERNATION = "|".join(re.escape(t) + "(?:es|s)?" for t in PARALINGUISTIC_TAGS)
+TAG_PATTERN = re.compile(rf"[\[<]\s*(?:{_TAG_ALTERNATION})\s*[\]>]", re.IGNORECASE)
+PAREN_TAG_PATTERN = re.compile(rf"\(\s*(?:{_TAG_ALTERNATION})\s*\)", re.IGNORECASE)
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are watching a friend play Minecraft over their shoulder and commenting live. "
+    "Personality: a tsundere who acts unimpressed but is secretly invested — tease them when "
+    "they do something stupid, and grudgingly admit it when they pull something off."
+)
+
+DEFAULTS = {
+    "GEMINI_API_KEY": "",
+    "VOICE_ID": "",
+    "LOG_DIRECTORY": "",
+    # Flash Lite has the friendlier free-tier rate limits, which matters when a busy session
+    # fires several CRITICAL events in a row.
+    "GEMINI_MODEL": "gemini-3.5-flash-lite",
+    "ELEVENLABS_MODEL": "eleven_turbo_v2_5",
+    "SYSTEM_PROMPT": DEFAULT_SYSTEM_PROMPT,
+    "CHECK_INTERVAL": "0.5",
+    "SEND_INTERVAL": "45",
+    "NOTABLE_DEBOUNCE": "3",
+    "MAX_CHARS_PER_SEND": "2000",
+    "HISTORY_TURNS": "12",
+    # Backend order in "auto": local Chatterbox if its server answers, then ElevenLabs, then Edge.
+    # Force one with "chatterbox" / "elevenlabs" / "edge".
+    "TTS_BACKEND": "auto",
+    "EDGE_VOICE": "en-US-AriaNeural",
+    # --- local Chatterbox server (github.com/devnen/Chatterbox-TTS-Server) ---
+    "CHATTERBOX_URL": "http://localhost:8004",
+    "CHATTERBOX_MODE": "predefined",  # "predefined" or "clone"
+    "CHATTERBOX_VOICE": "",  # predefined voice id, or reference audio filename when cloning
+    "CHATTERBOX_EXAGGERATION": "1.0",  # 0 = monotone, higher = more dramatic
+    "CHATTERBOX_TEMPERATURE": "0.75",
+    "CHATTERBOX_CFG_WEIGHT": "3.0",
+    # Multiplier applied to exaggeration on CRITICAL events (death, creeper, low health).
+    "CHATTERBOX_URGENT_BOOST": "1.4",
+    # Start the server automatically when it is not already running.
+    "CHATTERBOX_AUTOSTART": "false",
+    "CHATTERBOX_PATH": "",  # folder holding server.py (the cloned Chatterbox-TTS-Server)
+    "CHATTERBOX_START_TIMEOUT": "180",
+    # Confirmed working by ear on chatterbox-tts 0.1.6 with SQUARE brackets, [laugh].
+    # Audio length is not a reliable test here — a performed sigh lasts about as long as the
+    # spoken word "sigh". When false, tags are stripped on every backend.
+    "CHATTERBOX_USE_TAGS": "true",
+}
+
+# ElevenLabs "Default" voices: unlike Voice Library voices, these work on the free plan via the
+# API. Note ElevenLabs has announced the current default set expires on 2026-12-31.
+ELEVENLABS_DEFAULT_VOICES = {
+    "Rachel": "21m00Tcm4TlvDq8ikWAM",
+    "Domi": "AZnzlk1XvdvUeBnXmlld",
+    "Bella": "EXAVITQu4vr4xnSDxMaL",
+    "Antoni": "ErXwobaYiN019PkySvjV",
+    "Elli": "MF3mGyEYCl7XYWbV9V6O",
+    "Josh": "TxGEqnHWrfWFTfGW9XjX",
+}
+
 
 class Config:
-    """Configuration manager with .env file support"""
-    
+    """Settings in .env, ElevenLabs keys in their own JSON file."""
+
     def __init__(self):
         self.load_env()
         self.elevenlabs_keys = self.load_elevenlabs_keys()
         self.current_key_index = 0
-    
+
     def load_env(self):
-        """Load or create .env file"""
         if not os.path.exists(ENV_FILE):
-            self._create_default_env()
+            with open(ENV_FILE, "w", encoding="utf-8") as f:
+                for key, value in DEFAULTS.items():
+                    f.write(f"{key}={value}\n")
         load_dotenv(ENV_FILE)
-    
-    def _create_default_env(self):
-        """Create default .env file"""
-        defaults = {
-            'GEMINI_API_KEY': '',
-            'VOICE_ID': '',
-            'LOG_DIRECTORY': '',
-            'GEMINI_MODEL': 'gemini-2.0-flash',
-            'ELEVENLABS_MODEL': 'eleven_turbo_v2_5',
-            'SYSTEM_PROMPT': 'context: Currently you only receive the logs of the users actions, you must act as if you were seeing their Minecraft gameplay directly. personality: you act like a tsundere and react to what the user is doing dont hesitate to trash them when they do something bad',
-            'CHECK_INTERVAL': '1',
-            'SEND_INTERVAL': '30'
-        }
-        
-        with open(ENV_FILE, 'w') as f:
-            for key, value in defaults.items():
-                f.write(f'{key}={value}\n')
-    
+        self._add_missing_settings()
+
+    def _add_missing_settings(self):
+        """
+        Fills in settings introduced by a newer version of the script, leaving everything the
+        user already set completely alone — including an empty value, which is a deliberate
+        'not configured yet' rather than a missing key.
+        """
+        added = []
+        for key, value in DEFAULTS.items():
+            if os.getenv(key) is None:
+                set_key(ENV_FILE, key, value)
+                os.environ[key] = value
+                added.append(key)
+        if added:
+            print(f"[MIGRATE] New settings added to .env: {', '.join(added)}")
+
     def load_elevenlabs_keys(self):
-        """Load ElevenLabs API keys from JSON file"""
         if not os.path.exists(API_KEYS_FILE):
-            default_keys = {
-                "keys": [],
-                "usage_count": {}
-            }
-            with open(API_KEYS_FILE, 'w') as f:
-                json.dump(default_keys, f, indent=2)
-            return default_keys
-        
+            empty = {"keys": [], "usage_count": {}}
+            with open(API_KEYS_FILE, "w", encoding="utf-8") as f:
+                json.dump(empty, f, indent=2)
+            return empty
         try:
-            with open(API_KEYS_FILE, 'r') as f:
+            with open(API_KEYS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except:
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[WARN] Could not read {API_KEYS_FILE} ({e}); starting empty.")
             return {"keys": [], "usage_count": {}}
-    
+
     def save_elevenlabs_keys(self):
-        """Save ElevenLabs API keys to JSON file"""
-        with open(API_KEYS_FILE, 'w') as f:
+        with open(API_KEYS_FILE, "w", encoding="utf-8") as f:
             json.dump(self.elevenlabs_keys, f, indent=2)
-    
+
     def add_elevenlabs_key(self, api_key):
-        """Add a new ElevenLabs API key"""
-        if api_key not in self.elevenlabs_keys["keys"]:
-            self.elevenlabs_keys["keys"].append(api_key)
-            self.elevenlabs_keys["usage_count"][api_key] = 0
-            self.save_elevenlabs_keys()
-            print(f"[SUCCESS] API key added successfully!")
-            return True
-        else:
-            print(f"[INFO] This API key already exists.")
+        if api_key in self.elevenlabs_keys["keys"]:
+            print("[INFO] This API key already exists.")
             return False
-    
-    def remove_elevenlabs_key(self, index):
-        """Remove an ElevenLabs API key by index"""
-        if 0 <= index < len(self.elevenlabs_keys["keys"]):
-            key = self.elevenlabs_keys["keys"].pop(index)
-            if key in self.elevenlabs_keys["usage_count"]:
-                del self.elevenlabs_keys["usage_count"][key]
-            self.save_elevenlabs_keys()
-            print(f"[SUCCESS] API key removed successfully!")
-            return True
-        return False
-    
-    def get_current_elevenlabs_key(self):
-        """Get current ElevenLabs API key"""
-        if not self.elevenlabs_keys["keys"]:
-            return None
-        return self.elevenlabs_keys["keys"][self.current_key_index]
-    
-    def switch_to_next_key(self):
-        """Switch to next available API key"""
-        if len(self.elevenlabs_keys["keys"]) <= 1:
-            print("[WARNING] No other API keys available!")
-            return False
-        
-        self.current_key_index = (self.current_key_index + 1) % len(self.elevenlabs_keys["keys"])
-        print(f"[SWITCH] Switched to API key #{self.current_key_index + 1}")
+        self.elevenlabs_keys["keys"].append(api_key)
+        self.elevenlabs_keys["usage_count"][api_key] = 0
+        self.save_elevenlabs_keys()
+        print("[OK] API key added.")
         return True
-    
+
+    def remove_elevenlabs_key(self, index):
+        if not 0 <= index < len(self.elevenlabs_keys["keys"]):
+            return False
+        key = self.elevenlabs_keys["keys"].pop(index)
+        self.elevenlabs_keys["usage_count"].pop(key, None)
+        self.current_key_index = 0
+        self.save_elevenlabs_keys()
+        print("[OK] API key removed.")
+        return True
+
+    def current_elevenlabs_key(self):
+        keys = self.elevenlabs_keys["keys"]
+        if not keys:
+            return None
+        return keys[self.current_key_index % len(keys)]
+
+    def switch_to_next_key(self):
+        if len(self.elevenlabs_keys["keys"]) <= 1:
+            return False
+        self.current_key_index = (self.current_key_index + 1) % len(self.elevenlabs_keys["keys"])
+        print(f"[SWITCH] Now using ElevenLabs key #{self.current_key_index + 1}")
+        return True
+
     def increment_usage(self, api_key):
-        """Increment usage count for an API key"""
-        if api_key in self.elevenlabs_keys["usage_count"]:
-            self.elevenlabs_keys["usage_count"][api_key] += 1
-            self.save_elevenlabs_keys()
-    
-    def get(self, key, default=''):
-        return os.getenv(key, default)
-    
+        counts = self.elevenlabs_keys["usage_count"]
+        counts[api_key] = counts.get(api_key, 0) + 1
+        self.save_elevenlabs_keys()
+
+    def get(self, key, default=""):
+        value = os.getenv(key, "")
+        return value if value != "" else (DEFAULTS.get(key, default) if default == "" else default)
+
+    def get_float(self, key):
+        try:
+            return float(self.get(key))
+        except (TypeError, ValueError):
+            return float(DEFAULTS[key])
+
+    def get_int(self, key):
+        try:
+            return int(float(self.get(key)))
+        except (TypeError, ValueError):
+            return int(DEFAULTS[key])
+
     def set(self, key, value):
         set_key(ENV_FILE, key, value)
         os.environ[key] = value
-    
+
     def is_configured(self):
-        required = ['GEMINI_API_KEY', 'VOICE_ID', 'LOG_DIRECTORY']
-        has_elevenlabs = len(self.elevenlabs_keys["keys"]) > 0
-        return all(self.get(key) for key in required) and has_elevenlabs
+        required = ["GEMINI_API_KEY", "VOICE_ID", "LOG_DIRECTORY"]
+        return all(self.get(k) for k in required) and bool(self.elevenlabs_keys["keys"])
 
 
-# ==================== CHAT HISTORY MANAGER ====================
-class ChatHistoryManager:
-    """Manage chat history saving and loading"""
-    
-    def __init__(self):
-        if not os.path.exists(CHAT_HISTORY_DIR):
-            os.makedirs(CHAT_HISTORY_DIR)
-    
-    def save_chat(self, chat_history, name=None):
-        """Save chat history to file"""
-        if name is None:
-            name = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
-        filepath = os.path.join(CHAT_HISTORY_DIR, f'{name}.json')
-        
-        # Convert history to serializable format
-        serializable_history = []
-        for msg in chat_history:
-            serializable_history.append({
-                'role': msg.role,
-                'parts': [part.text for part in msg.parts]
-            })
-        
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(serializable_history, f, indent=2, ensure_ascii=False)
-        
-        print(f"[SAVE] Chat history saved to: {filepath}")
-        return filepath
-    
-    def list_saved_chats(self):
-        """List all saved chat histories"""
-        files = [f for f in os.listdir(CHAT_HISTORY_DIR) if f.endswith('.json')]
-        return sorted(files, reverse=True)
-    
-    def load_chat(self, filename):
-        """Load chat history from file"""
-        filepath = os.path.join(CHAT_HISTORY_DIR, filename)
-        
-        if not os.path.exists(filepath):
-            print(f"[ERROR] Chat history file not found: {filepath}")
-            return None
-        
-        with open(filepath, 'r', encoding='utf-8') as f:
-            history = json.load(f)
-        
-        print(f"[LOAD] Chat history loaded from: {filepath}")
-        return history
+# ==================== LOG TAILING ====================
+class LogTailer:
+    """
+    Incremental JSONL reader.
 
+    Tracks byte offset and file identity so it keeps working when Minecraft restarts and the mod
+    truncates the log — the failure mode that used to wedge this bot permanently.
+    """
 
-# ==================== FILE WATCHER ====================
-class LogFileWatcher:
-    """Watch for log files and monitor changes"""
-    
     def __init__(self, directory):
-        self.directory = directory
-        self.log_file = None
-        self.last_content = ""
-    
-    def find_log_file(self):
-        """Find first .log file in directory"""
-        if not os.path.exists(self.directory):
+        self.directory = Path(directory)
+        self.path = None
+        self.offset = 0
+        self.inode = None
+        self.partial = ""
+
+    def find_log(self):
+        """Prefers the mod's session.log, falls back to any .log in the directory."""
+        if not self.directory.is_dir():
             return None
-        
-        for file in os.listdir(self.directory):
-            if file.endswith('.log'):
-                return os.path.join(self.directory, file)
-        return None
-    
-    def wait_for_log_file(self):
-        """Wait until a log file appears"""
-        print(f"[WAIT] Waiting for .log file in: {self.directory}")
+        preferred = self.directory / LOG_FILE_NAME
+        if preferred.is_file():
+            return preferred
+        logs = sorted(self.directory.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        return logs[0] if logs else None
+
+    def wait_for_log(self):
+        print(f"[WAIT] Looking for a log file in {self.directory}")
         while True:
-            log_file = self.find_log_file()
-            if log_file:
-                self.log_file = log_file
-                print(f"[FOUND] Log file found: {log_file}")
-                return log_file
+            found = self.find_log()
+            if found:
+                self.attach(found)
+                return found
             time.sleep(1)
-    
-    def read_file(self):
-        """Read log file content"""
-        if not self.log_file or not os.path.exists(self.log_file):
-            return ""
-        
+
+    def attach(self, path, from_start=False):
+        self.path = Path(path)
+        stat = self.path.stat()
+        self.inode = stat.st_ino
+        # Start at the end: we care about what happens from now on, not the whole backlog.
+        self.offset = 0 if from_start else stat.st_size
+        self.partial = ""
+        print(f"[LOG] Following {self.path}")
+
+    def poll(self):
+        """Returns the list of event dicts appended since the last call."""
+        if self.path is None or not self.path.exists():
+            return []
+
         try:
-            with open(self.log_file, 'r', encoding='utf-8', errors='ignore') as f:
-                return f.read()
-        except Exception as e:
-            print(f"[ERROR] Error reading file: {e}")
-            return ""
+            stat = self.path.stat()
+        except OSError:
+            return []
+
+        # New session: the mod truncated the file, or it was replaced entirely.
+        if stat.st_ino != self.inode or stat.st_size < self.offset:
+            print("[LOG] File was reset — a new Minecraft session started.")
+            self.inode = stat.st_ino
+            self.offset = 0
+            self.partial = ""
+
+        if stat.st_size == self.offset:
+            return []
+
+        try:
+            with open(self.path, "r", encoding="utf-8", errors="replace") as f:
+                f.seek(self.offset)
+                chunk = f.read()
+                self.offset = f.tell()
+        except OSError as e:
+            print(f"[ERROR] Could not read the log: {e}")
+            return []
+
+        chunk = self.partial + chunk
+        lines = chunk.split("\n")
+        # A trailing fragment means the mod was mid-write; hold it until the rest arrives.
+        self.partial = lines.pop()
+
+        events = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue  # tolerate a torn or non-JSON line rather than dying
+        return events
 
 
-# ==================== AI HANDLER ====================
-class AIHandler:
-    """Handle Gemini AI and ElevenLabs TTS"""
-    
-    def __init__(self, config):
-        self.config = config
-        self.model = None
-        self.chat = None
-        self.chat_manager = ChatHistoryManager()
-    
-    def init_gemini(self, chat_history=None):
-        """Initialize Gemini API"""
-        genai.configure(api_key=self.config.get('GEMINI_API_KEY'))
-        
-        self.model = genai.GenerativeModel(
-            model_name=self.config.get('GEMINI_MODEL'),
-            system_instruction=self.config.get('SYSTEM_PROMPT')
-        )
-        
-        # Start chat with history if provided
-        history = []
-        if chat_history:
-            history = chat_history
-        
-        self.chat = self.model.start_chat(history=history)
-        print("[INIT] Gemini chat initialized!")
-    
-    def send_message(self, text):
-        """Send message to Gemini and synthesize response"""
-        if not self.chat:
-            print("[ERROR] Chat not initialized!")
-            return
-        
-        try:
-            print(f"\n[SEND] Sending to Gemini...")
-            response = self.chat.send_message(text)
-            
-            if not response or not hasattr(response, 'text'):
-                print("[ERROR] Invalid Gemini response")
-                return
-            
-            gemini_response = response.text
-            print(f"[GEMINI] Response: {gemini_response[:100]}...")
-            
-            # Synthesize and play audio
-            self._synthesize_and_play(gemini_response)
-            
-        except Exception as e:
-            print(f"[ERROR] Error in send_message(): {e}")
-    
-    def _synthesize_and_play(self, text, retry_count=0):
-        """Synthesize text to speech and play"""
-        max_retries = len(self.config.elevenlabs_keys["keys"])
-        
-        if retry_count >= max_retries:
-            print("[ERROR] All API keys failed!")
-            return
-        
-        api_key = self.config.get_current_elevenlabs_key()
-        
-        if not api_key:
-            print("[ERROR] No ElevenLabs API key available!")
-            return
-        
-        print(f"[ELEVENLABS] Synthesizing speech... (Key #{self.config.current_key_index + 1})")
-        
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.config.get('VOICE_ID')}"
-        
-        headers = {
-            "Accept": "audio/mpeg",
-            "Content-Type": "application/json",
-            "xi-api-key": api_key
-        }
-        
-        data = {
-            "text": text,
-            "model_id": self.config.get('ELEVENLABS_MODEL'),
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.5
-            }
-        }
-        
-        try:
-            response = requests.post(url, json=data, headers=headers)
-            
-            if response.status_code == 200:
-                # Increment usage count
-                self.config.increment_usage(api_key)
-                
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp_file:
-                    tmp_file.write(response.content)
-                    mp3_path = tmp_file.name
-                
-                print(f"[AUDIO] Playing audio...")
-                self._play_audio(mp3_path)
-                os.remove(mp3_path)
-                print(f"[SUCCESS] Audio played successfully!\n")
-            else:
-                print(f"[ERROR] ElevenLabs error: {response.status_code} - {response.text}")
-                
-                # Switch to next key and retry
-                if self.config.switch_to_next_key():
-                    print("[RETRY] Retrying with next API key...")
-                    time.sleep(1)
-                    self._synthesize_and_play(text, retry_count + 1)
-        
-        except Exception as e:
-            print(f"[ERROR] Error synthesizing speech: {e}")
-            
-            # Switch to next key and retry
-            if self.config.switch_to_next_key():
-                print("[RETRY] Retrying with next API key...")
-                time.sleep(1)
-                self._synthesize_and_play(text, retry_count + 1)
-    
-    def _play_audio(self, file_path):
-        """Play audio file based on OS"""
-        system = platform.system()
-        
-        try:
-            if system == "Windows":
-                os.startfile(file_path)
-                time.sleep(5)
-            elif system == "Darwin":
-                subprocess.run(["afplay", file_path])
-            elif system == "Linux":
-                subprocess.run(["mpg123", file_path])
-            else:
-                print(f"[WARNING] Unsupported OS for audio playback: {system}")
-        except Exception as e:
-            print(f"[ERROR] Error playing audio: {e}")
-    
-    def save_chat_history(self):
-        """Save current chat history"""
-        if self.chat and hasattr(self.chat, 'history'):
-            return self.chat_manager.save_chat(self.chat.history)
+# ==================== AUDIO ====================
+class AudioPlayer:
+    """
+    Plays clips on a worker thread so the log keeps being read while the AI talks.
+    A critical clip clears anything queued and interrupts what is playing.
+    """
+
+    def __init__(self):
+        self.queue = queue.Queue()
+        self.process = None
+        self.lock = threading.Lock()
+        self.command = self._detect_player()
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.thread.start()
+
+    @staticmethod
+    def _detect_player():
+        for name in ("ffplay", "mpv", "mpg123", "afplay"):
+            path = shutil.which(name)
+            if not path:
+                continue
+            if name == "ffplay":
+                return [path, "-nodisp", "-autoexit", "-loglevel", "quiet"]
+            if name == "mpv":
+                return [path, "--no-video", "--really-quiet"]
+            return [path]
         return None
 
+    def available(self):
+        return self.command is not None
 
-# ==================== SETUP WIZARD ====================
-class SetupWizard:
-    """Interactive setup wizard"""
-    
+    def play(self, mp3_bytes, interrupt=False):
+        if interrupt:
+            self._drain()
+            self._kill_current()
+        self.queue.put(mp3_bytes)
+
+    def _drain(self):
+        while True:
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except queue.Empty:
+                return
+
+    def _kill_current(self):
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                self.process.terminate()
+
+    def _worker(self):
+        while True:
+            data = self.queue.get()
+            try:
+                self._play_blocking(data)
+            except Exception as e:
+                print(f"[ERROR] Audio playback failed: {e}")
+            finally:
+                self.queue.task_done()
+
+    def _play_blocking(self, data):
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+            tmp.write(data)
+            path = tmp.name
+
+        try:
+            if self.command:
+                with self.lock:
+                    self.process = subprocess.Popen(
+                        self.command + [path],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                self.process.wait()
+                with self.lock:
+                    self.process = None
+            elif platform.system() == "Windows":
+                os.startfile(path)  # noqa: S606 - no interruptible player available
+                time.sleep(6)
+            else:
+                print("[WARN] No audio player found. Install ffplay, mpv or mpg123.")
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+# ==================== CHATTERBOX LAUNCHER ====================
+class ChatterboxLauncher:
+    """
+    Starts the local Chatterbox server on demand.
+
+    It runs `server.py` directly rather than `start.sh`, because the shell script prompts for
+    hardware selection and would block forever unattended. If the server was already running
+    when we looked, we leave it alone on exit — we only stop what we started.
+    """
+
     def __init__(self, config):
         self.config = config
-    
+        self.process = None
+
+    def enabled(self):
+        return self.config.get("CHATTERBOX_AUTOSTART").lower() in ("1", "true", "yes", "on")
+
+    def _find_python(self, folder):
+        """Prefers the server's own virtualenv — it holds torch and the model deps."""
+        for candidate in (".venv/bin/python", "venv/bin/python",
+                          ".venv/Scripts/python.exe", "venv/Scripts/python.exe"):
+            path = folder / candidate
+            if path.is_file():
+                return str(path)
+        return sys.executable
+
+    def start(self):
+        """Launches the server and waits for it to answer. Returns True once it is up."""
+        folder = self.config.get("CHATTERBOX_PATH")
+        if not folder:
+            print("[CHATTERBOX] Autostart is on but CHATTERBOX_PATH is not set.")
+            return False
+
+        folder = Path(folder).expanduser()
+        server_py = folder / "server.py"
+        if not server_py.is_file():
+            print(f"[CHATTERBOX] No server.py in {folder}")
+            return False
+
+        python = self._find_python(folder)
+        print(f"[CHATTERBOX] Starting server from {folder} ...")
+        print("[CHATTERBOX] First run loads the model onto the GPU, this can take a minute.")
+
+        try:
+            self.process = subprocess.Popen(
+                [python, "server.py"],
+                cwd=str(folder),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as e:
+            print(f"[CHATTERBOX] Could not start the server: {e}")
+            return False
+
+        return self._wait_until_ready()
+
+    def _wait_until_ready(self):
+        base = self.config.get("CHATTERBOX_URL").rstrip("/")
+        try:
+            timeout = float(self.config.get("CHATTERBOX_START_TIMEOUT"))
+        except ValueError:
+            timeout = 180.0
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.process.poll() is not None:
+                print("[CHATTERBOX] The server exited while starting up.")
+                print(f"[CHATTERBOX] Run it manually to see why:  cd {self.config.get('CHATTERBOX_PATH')} && ./start.sh")
+                self.process = None
+                return False
+            try:
+                if requests.get(f"{base}/api/model-info", timeout=2).status_code == 200:
+                    print("[CHATTERBOX] Server is ready.")
+                    return True
+            except requests.RequestException:
+                pass
+            time.sleep(2)
+
+        print(f"[CHATTERBOX] Server did not come up within {timeout:.0f}s.")
+        return False
+
+    def stop(self):
+        if not self.process:
+            return
+        print("[CHATTERBOX] Stopping the server we started.")
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+        self.process = None
+
+
+# ==================== TEXT TO SPEECH ====================
+class TTS:
+    """
+    Speech synthesis with a free fallback.
+
+    ElevenLabs sounds better but its free plan is both tiny (10k characters/month) and now
+    refuses Voice Library voices over the API with a 402. Edge TTS needs no key and has no
+    practical cap, so in "auto" mode it takes over the moment ElevenLabs refuses — the
+    commentary keeps talking instead of going silent.
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self.backend = config.get("TTS_BACKEND").lower()
+        # Set after an error that will not fix itself, so we stop paying the round-trip each time.
+        self.elevenlabs_blocked = False
+        self._chatterbox_up = None  # None = not probed yet
+
+    def supports_tags(self):
+        """
+        Whether performance cues should be offered to the model at all.
+
+        Gated behind CHATTERBOX_USE_TAGS because the feature is currently broken upstream —
+        see the note on that setting.
+        """
+        if self.config.get("CHATTERBOX_USE_TAGS").lower() not in ("1", "true", "yes", "on"):
+            return False
+        return self.backend in ("auto", "chatterbox") and self._chatterbox_available()
+
+    @staticmethod
+    def _strip_tags(text):
+        return TAG_PATTERN.sub("", text).replace("  ", " ").strip()
+
+    @staticmethod
+    def _normalize_tags(text):
+        """
+        Rewrites cues to the square-bracket form Chatterbox expects.
+
+        The model only performs [laugh]; anything else is read out loud. Since the LLM
+        occasionally reaches for <laugh> or (laughs), those are repaired rather than spoken.
+        """
+        def repair(match):
+            inner = match.group(0).strip("[]<>()").strip().lower()
+            # Depluralise only when that yields a real tag — "shush" must stay "shush".
+            if inner not in PARALINGUISTIC_TAGS:
+                for suffix in ("es", "s"):
+                    if inner.endswith(suffix) and inner[: -len(suffix)] in PARALINGUISTIC_TAGS:
+                        inner = inner[: -len(suffix)]
+                        break
+            return f"[{inner}]"
+
+        normalized = TAG_PATTERN.sub(repair, text)
+        return PAREN_TAG_PATTERN.sub(repair, normalized)
+
+    def synthesize(self, text, urgent=False):
+        if self.backend in ("auto", "chatterbox") and self._chatterbox_available():
+            audio = self._chatterbox(text, urgent)
+            if audio:
+                return audio
+            if self.backend == "chatterbox":
+                return None
+            print("[TTS] Chatterbox failed, falling back.")
+
+        if self.backend in ("auto", "elevenlabs") and not self.elevenlabs_blocked:
+            audio = self._elevenlabs(text)
+            if audio:
+                return audio
+            if self.backend == "elevenlabs":
+                return None
+            print("[TTS] Falling back to Edge TTS.")
+
+        if self.backend in ("auto", "edge", "chatterbox", "elevenlabs"):
+            return self._edge(text)
+        return None
+
+    # ---- Chatterbox (local, GPU, emotional) ----
+    def _chatterbox_available(self):
+        """Probed once per run so a stopped server costs one timeout, not one per line."""
+        if self._chatterbox_up is not None:
+            return self._chatterbox_up
+
+        base = self.config.get("CHATTERBOX_URL").rstrip("/")
+        try:
+            response = requests.get(f"{base}/api/model-info", timeout=3)
+            self._chatterbox_up = response.status_code == 200
+        except requests.RequestException:
+            self._chatterbox_up = False
+
+        if self._chatterbox_up:
+            print(f"[TTS] Local Chatterbox server found at {base}.")
+        elif self.backend == "chatterbox":
+            print(f"[TTS] No Chatterbox server at {base} — start it, or set TTS_BACKEND=edge.")
+        return self._chatterbox_up
+
+    def _chatterbox(self, text, urgent=False):
+        base = self.config.get("CHATTERBOX_URL").rstrip("/")
+
+        # Cues reach the model only in the exact form it performs; otherwise they are removed,
+        # because anything it does not recognise gets read out loud.
+        text = self._normalize_tags(text) if self.supports_tags() else self._strip_tags(text)
+        if not text:
+            return None
+
+        try:
+            exaggeration = float(self.config.get("CHATTERBOX_EXAGGERATION"))
+            boost = float(self.config.get("CHATTERBOX_URGENT_BOOST"))
+        except ValueError:
+            exaggeration, boost = 1.0, 1.4
+
+        # A death or a lit creeper should not be read in the same tone as "mined 60 stone".
+        if urgent:
+            exaggeration = min(2.0, exaggeration * boost)
+
+        payload = {
+            "text": text,
+            "voice_mode": self.config.get("CHATTERBOX_MODE"),
+            "output_format": "mp3",
+            "exaggeration": exaggeration,
+            "temperature": float(self.config.get("CHATTERBOX_TEMPERATURE")),
+            "cfg_weight": float(self.config.get("CHATTERBOX_CFG_WEIGHT")),
+            "speed_factor": 1.0,
+            "language": "en",
+            "stream": False,
+            "split_text": True,
+        }
+
+        voice = self.config.get("CHATTERBOX_VOICE")
+        if voice:
+            key = ("reference_audio_filename"
+                   if payload["voice_mode"] == "clone" else "predefined_voice_id")
+            payload[key] = voice
+
+        try:
+            response = requests.post(f"{base}/tts", json=payload, timeout=60)
+        except requests.RequestException as e:
+            print(f"[ERROR] Chatterbox request failed: {e}")
+            self._chatterbox_up = False  # server went away mid-session
+            return None
+
+        if response.status_code == 200:
+            return response.content
+
+        print(f"[ERROR] Chatterbox {response.status_code}: {response.text[:200]}")
+        return None
+
+    # ---- Edge (free, no key) ----
+    def _edge(self, text):
+        if edge_tts is None:
+            print("[ERROR] edge-tts is not installed. Run: pip install edge-tts")
+            return None
+
+        text = self._strip_tags(text)  # Edge would pronounce "<sigh>" literally
+        if not text:
+            return None
+
+        voice = self.config.get("EDGE_VOICE")
+
+        async def run():
+            communicate = edge_tts.Communicate(text, voice)
+            buffer = bytearray()
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    buffer.extend(chunk["data"])
+            return bytes(buffer)
+
+        try:
+            return asyncio.run(run())
+        except Exception as e:
+            print(f"[ERROR] Edge TTS failed: {e}")
+            return None
+
+    # ---- ElevenLabs ----
+    def _elevenlabs(self, text, attempt=0):
+        text = self._strip_tags(text)  # ElevenLabs would pronounce "<sigh>" literally
+        keys = self.config.elevenlabs_keys["keys"]
+        if attempt >= max(1, len(keys)):
+            print("[ERROR] Every ElevenLabs key failed.")
+            return None
+
+        api_key = self.config.current_elevenlabs_key()
+        if not api_key:
+            return None
+
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.config.get('VOICE_ID')}"
+        try:
+            response = requests.post(
+                url,
+                json={
+                    "text": text,
+                    "model_id": self.config.get("ELEVENLABS_MODEL"),
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.5},
+                },
+                headers={
+                    "Accept": "audio/mpeg",
+                    "Content-Type": "application/json",
+                    "xi-api-key": api_key,
+                },
+                timeout=30,  # never let a hung request stall the whole bot
+            )
+        except requests.RequestException as e:
+            print(f"[ERROR] ElevenLabs request failed: {e}")
+            if self.config.switch_to_next_key():
+                return self._elevenlabs(text, attempt + 1)
+            return None
+
+        if response.status_code == 200:
+            self.config.increment_usage(api_key)
+            return response.content
+
+        detail = response.text[:200]
+        print(f"[ERROR] ElevenLabs {response.status_code}: {detail}")
+
+        # 402 = the voice itself is off-limits on this plan. Rotating keys cannot help, and
+        # every future call would fail the same way.
+        if response.status_code == 402:
+            self.elevenlabs_blocked = True
+            print(
+                "[TTS] This voice needs a paid plan (Voice Library voices are blocked on the\n"
+                "      free API tier). Either pick a Default voice — menu 'ElevenLabs voices' —\n"
+                "      or set TTS_BACKEND=edge to use the free engine."
+            )
+            return None
+
+        # 401 = bad key, 429 = quota. Both are worth rotating away from.
+        if response.status_code in (401, 429) and self.config.switch_to_next_key():
+            return self._elevenlabs(text, attempt + 1)
+        return None
+
+    # ---- Chatterbox voice management ----
+    def _chatterbox_get(self, path):
+        base = self.config.get("CHATTERBOX_URL").rstrip("/")
+        try:
+            response = requests.get(f"{base}{path}", timeout=10)
+        except requests.RequestException as e:
+            print(f"[ERROR] Chatterbox unreachable: {e}")
+            return None
+        if response.status_code != 200:
+            print(f"[ERROR] Chatterbox {response.status_code} on {path}")
+            return None
+        try:
+            return response.json()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _names_from(payload):
+        """
+        Normalises the various shapes these endpoints can return: a bare list of strings, a list
+        of dicts, or a dict wrapping one of those.
+        """
+        if payload is None:
+            return []
+        if isinstance(payload, dict):
+            for key in ("voices", "files", "reference_files", "data"):
+                if key in payload:
+                    payload = payload[key]
+                    break
+            else:
+                return []
+        if not isinstance(payload, list):
+            return []
+
+        names = []
+        for item in payload:
+            if isinstance(item, str):
+                names.append(item)
+            elif isinstance(item, dict):
+                for key in ("filename", "name", "display_name", "voice_id", "id"):
+                    if item.get(key):
+                        names.append(str(item[key]))
+                        break
+        return names
+
+    def list_predefined_voices(self):
+        return self._names_from(self._chatterbox_get("/get_predefined_voices"))
+
+    def list_reference_files(self):
+        return self._names_from(self._chatterbox_get("/get_reference_files"))
+
+    def upload_reference(self, file_path):
+        """
+        Uploads a .wav/.mp3 to the server's reference_audio/ folder.
+
+        The multipart field name is not documented, so both common spellings are tried before
+        giving up and telling the user to drop the file in manually.
+        """
+        base = self.config.get("CHATTERBOX_URL").rstrip("/")
+        path = Path(file_path).expanduser()
+
+        if not path.is_file():
+            print(f"[ERROR] No such file: {path}")
+            return None
+        if path.suffix.lower() not in (".wav", ".mp3"):
+            print(f"[ERROR] Reference audio must be .wav or .mp3 (got {path.suffix}).")
+            return None
+
+        for field in ("files", "file"):
+            try:
+                with open(path, "rb") as handle:
+                    response = requests.post(
+                        f"{base}/upload_reference",
+                        files={field: (path.name, handle, "audio/mpeg")},
+                        timeout=60,
+                    )
+            except requests.RequestException as e:
+                print(f"[ERROR] Upload failed: {e}")
+                return None
+
+            if response.status_code == 200:
+                print(f"[OK] Uploaded {path.name} to the server.")
+                return path.name
+            # 422 = FastAPI rejected the field name; worth trying the other spelling.
+            if response.status_code != 422:
+                print(f"[ERROR] Chatterbox {response.status_code}: {response.text[:200]}")
+                return None
+
+        print(
+            "[ERROR] The server rejected the upload.\n"
+            f"        Copy {path.name} into the server's reference_audio/ folder yourself,\n"
+            "        then pick it from the list."
+        )
+        return None
+
+    def list_elevenlabs_voices(self):
+        """Lists the voices this account can actually use. Costs no characters."""
+        api_key = self.config.current_elevenlabs_key()
+        if not api_key:
+            print("[ERROR] No ElevenLabs key configured.")
+            return
+
+        try:
+            response = requests.get(
+                "https://api.elevenlabs.io/v1/voices",
+                headers={"xi-api-key": api_key},
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            print(f"[ERROR] Could not reach ElevenLabs: {e}")
+            return
+
+        if response.status_code != 200:
+            print(f"[ERROR] ElevenLabs {response.status_code}: {response.text[:200]}")
+            return
+
+        voices = response.json().get("voices", [])
+        print(f"\n{len(voices)} voice(s) on this account:\n")
+        for voice in voices:
+            category = voice.get("category", "?")
+            flag = "  <-- free-tier safe" if category == "premade" else ""
+            print(f"  {voice.get('name','?'):22} {voice.get('voice_id','?')}  [{category}]{flag}")
+        print(
+            "\nOnly 'premade' (Default) voices work on the free API tier."
+            "\n'professional' and 'generated' voices come from the Voice Library and return 402."
+        )
+
+
+# ==================== AI ====================
+class AIHandler:
+    def __init__(self, config, player):
+        self.config = config
+        self.player = player
+        self.tts = TTS(config)
+        self.client = genai.Client(api_key=config.get("GEMINI_API_KEY"))
+        self.history = []
+        self.max_turns = config.get_int("HISTORY_TURNS")
+        self.model = config.get("GEMINI_MODEL")
+        self.system_prompt = config.get("SYSTEM_PROMPT") + FORMAT_RULES
+        if self.tts.supports_tags():
+            self.system_prompt += PARALINGUISTIC_RULES
+            print("[AI] Chatterbox is live — performance cues enabled in the prompt.")
+
+    def comment(self, prompt_text, urgent=False):
+        try:
+            contents = self.history + [
+                genai_types.Content(role="user", parts=[genai_types.Part(text=prompt_text)])
+            ]
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=self.system_prompt,
+                    max_output_tokens=200,
+                    # We pass no tools, so the SDK's automatic function calling has nothing to
+                    # do — turning it off silences its "use Chat.send_message instead" warning.
+                    automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                        disable=True
+                    ),
+                ),
+            )
+            reply = (response.text or "").strip()
+        except Exception as e:
+            print(f"[ERROR] Gemini call failed: {e}")
+            return
+
+        if not reply:
+            print("[WARN] Gemini returned nothing.")
+            return
+
+        print(f"[AI] {reply}")
+        self._remember(prompt_text, reply)
+
+        # `urgent` also drives the delivery, not just the timing: on Chatterbox it dials up the
+        # emotional exaggeration so a death sounds like one.
+        audio = self.tts.synthesize(reply, urgent=urgent)
+        if audio:
+            self.player.play(audio, interrupt=urgent)
+
+    def _remember(self, prompt_text, reply):
+        self.history.append(
+            genai_types.Content(role="user", parts=[genai_types.Part(text=prompt_text)])
+        )
+        self.history.append(
+            genai_types.Content(role="model", parts=[genai_types.Part(text=reply)])
+        )
+        # Sliding window, so a long stream does not turn into an ever-growing token bill.
+        limit = self.max_turns * 2
+        if len(self.history) > limit:
+            self.history = self.history[-limit:]
+
+
+# ==================== COMMENTATOR ====================
+class Commentator:
+    """Applies the send policy: CRITICAL now, NOTABLE debounced, INFO on the timer."""
+
+    def __init__(self, config, ai):
+        self.config = config
+        self.ai = ai
+        self.pending = []
+        self.scene = None
+        self.last_send = time.time()
+        self.notable_deadline = None
+        self.send_interval = config.get_int("SEND_INTERVAL")
+        self.debounce = config.get_float("NOTABLE_DEBOUNCE")
+        self.max_chars = config.get_int("MAX_CHARS_PER_SEND")
+
+    def ingest(self, events):
+        urgent = False
+        for event in events:
+            level = event.get("lvl", "INFO")
+
+            if event.get("type") == "scene":
+                self.scene = event.get("msg", "")
+                continue
+            if event.get("type") == "session_start":
+                # New world: forget the old context, it is a different story now.
+                self.pending.clear()
+                self.scene = None
+
+            self.pending.append(event)
+
+            if level == "CRITICAL":
+                urgent = True
+            elif level == "NOTABLE" and self.notable_deadline is None:
+                self.notable_deadline = time.time() + self.debounce
+
+        if urgent:
+            self.flush(urgent=True)
+
+    def maybe_flush(self):
+        now = time.time()
+        if self.notable_deadline and now >= self.notable_deadline:
+            self.flush()
+        elif now - self.last_send >= self.send_interval:
+            self.flush()
+
+    def flush(self, urgent=False):
+        self.last_send = time.time()
+        self.notable_deadline = None
+
+        if not self.pending:
+            return
+
+        events, self.pending = self.pending, []
+        body = self._render(events)
+        if not body:
+            return
+
+        prompt = ""
+        if self.scene:
+            prompt += f"[WHERE THEY ARE] {self.scene}\n"
+        prompt += f"[WHAT JUST HAPPENED]\n{body}"
+
+        print(f"\n[SEND]{' (urgent)' if urgent else ''}\n{prompt}\n")
+        self.ai.comment(prompt, urgent=urgent)
+
+    def _render(self, events):
+        """Renders newest-last, dropping the least important lines if over budget."""
+        lines = [f"{e.get('t', '')} [{e.get('lvl', 'INFO')}] {e.get('msg', '')}" for e in events]
+        text = "\n".join(lines)
+        if len(text) <= self.max_chars:
+            return text
+
+        # Over budget: keep CRITICAL and NOTABLE, then fill with the most recent INFO lines.
+        ranked = [e for e in events if e.get("lvl") in ("CRITICAL", "NOTABLE")]
+        info = [e for e in events if e.get("lvl") == "INFO"]
+        kept = ranked[:]
+        for event in reversed(info):
+            candidate = kept + [event]
+            rendered = "\n".join(
+                f"{e.get('t', '')} [{e.get('lvl', 'INFO')}] {e.get('msg', '')}" for e in candidate
+            )
+            if len(rendered) > self.max_chars:
+                break
+            kept = candidate
+
+        kept.sort(key=lambda e: events.index(e))
+        return "\n".join(
+            f"{e.get('t', '')} [{e.get('lvl', 'INFO')}] {e.get('msg', '')}" for e in kept
+        )
+
+
+# ==================== SETUP / MENUS ====================
+class SetupWizard:
+    def __init__(self, config):
+        self.config = config
+
     def run_initial_setup(self):
-        """Run initial setup if not configured"""
         print("\n" + "=" * 60)
         print("INITIAL SETUP")
         print("=" * 60)
-        
-        # Gemini API Key
-        if not self.config.get('GEMINI_API_KEY'):
-            api_key = input("Enter your Gemini API Key: ").strip()
-            self.config.set('GEMINI_API_KEY', api_key)
-        
-        # ElevenLabs API Keys
-        if len(self.config.elevenlabs_keys["keys"]) == 0:
-            print("\n[INFO] You need at least one ElevenLabs API key")
+
+        if not self.config.get("GEMINI_API_KEY"):
+            self.config.set("GEMINI_API_KEY", input("Gemini API key: ").strip())
+
+        if not self.config.elevenlabs_keys["keys"]:
+            print("\nYou need at least one ElevenLabs API key.")
             while True:
-                api_key = input("Enter an ElevenLabs API Key: ").strip()
-                if api_key:
-                    self.config.add_elevenlabs_key(api_key)
-                    
-                    add_more = input("Add another API key? (y/n): ").strip().lower()
-                    if add_more != 'y':
-                        break
-                else:
+                key = input("ElevenLabs API key: ").strip()
+                if not key:
                     break
-        
-        # Voice ID
-        if not self.config.get('VOICE_ID'):
-            voice_id = input("Enter your ElevenLabs Voice ID: ").strip()
-            self.config.set('VOICE_ID', voice_id)
-        
-        # Log directory
-        if not self.config.get('LOG_DIRECTORY'):
-            log_dir = input("Enter the full path to the directory containing .log files: ").strip()
-            self.config.set('LOG_DIRECTORY', log_dir)
-        
-        print("\n[SUCCESS] Initial setup complete!")
-    
+                self.config.add_elevenlabs_key(key)
+                if input("Add another? (y/n): ").strip().lower() != "y":
+                    break
+
+        if not self.config.get("VOICE_ID"):
+            self.config.set("VOICE_ID", input("ElevenLabs voice ID: ").strip())
+
+        if not self.config.get("LOG_DIRECTORY"):
+            print("\nThis is the mod's log folder, usually:")
+            print("  <your minecraft folder>/logs/player_actions")
+            self.config.set("LOG_DIRECTORY", input("Log directory: ").strip())
+
+        print("\n[OK] Setup complete.")
+
     def manage_api_keys(self):
-        """Manage API keys"""
         while True:
             print("\n" + "=" * 60)
-            print("API KEY MANAGEMENT")
+            print("API KEYS")
             print("=" * 60)
-            
-            # Gemini API Key
-            print("\n[GEMINI API KEY]")
-            current_gemini = self.config.get('GEMINI_API_KEY')
-            if current_gemini:
-                print(f"Current: {current_gemini[:20]}...{current_gemini[-10:]}")
-            else:
-                print("Current: Not set")
-            
-            # ElevenLabs API Keys
-            print("\n[ELEVENLABS API KEYS]")
-            if self.config.elevenlabs_keys["keys"]:
-                for i, key in enumerate(self.config.elevenlabs_keys["keys"]):
-                    usage = self.config.elevenlabs_keys["usage_count"].get(key, 0)
-                    marker = " <- CURRENT" if i == self.config.current_key_index else ""
-                    print(f"{i + 1}. {key[:20]}...{key[-10:]} (Used: {usage} times){marker}")
-            else:
-                print("No API keys configured")
-            
-            print("\n[OPTIONS]")
-            print("1. Change Gemini API Key")
-            print("2. Add ElevenLabs API Key")
-            print("3. Remove ElevenLabs API Key")
-            print("4. Back to main menu")
-            
-            choice = input("\nSelect option (1-4): ").strip()
-            
-            if choice == '1':
-                new_key = input("Enter new Gemini API Key: ").strip()
-                if new_key:
-                    self.config.set('GEMINI_API_KEY', new_key)
-                    print("[SUCCESS] Gemini API Key updated!")
-            
-            elif choice == '2':
-                new_key = input("Enter new ElevenLabs API Key: ").strip()
-                if new_key:
-                    self.config.add_elevenlabs_key(new_key)
-            
-            elif choice == '3':
-                if not self.config.elevenlabs_keys["keys"]:
-                    print("[ERROR] No API keys to remove!")
-                    continue
-                
+            gemini = self.config.get("GEMINI_API_KEY")
+            print(f"\nGemini: {mask(gemini) if gemini else 'not set'}")
+
+            print("\nElevenLabs:")
+            keys = self.config.elevenlabs_keys["keys"]
+            if not keys:
+                print("  none configured")
+            for i, key in enumerate(keys):
+                used = self.config.elevenlabs_keys["usage_count"].get(key, 0)
+                marker = "  <- current" if i == self.config.current_key_index else ""
+                print(f"  {i + 1}. {mask(key)} ({used} calls){marker}")
+
+            print("\n1. Change Gemini key   2. Add ElevenLabs key")
+            print("3. Remove ElevenLabs key   4. Back")
+            choice = input("> ").strip()
+
+            if choice == "1":
+                new = input("New Gemini key: ").strip()
+                if new:
+                    self.config.set("GEMINI_API_KEY", new)
+            elif choice == "2":
+                new = input("New ElevenLabs key: ").strip()
+                if new:
+                    self.config.add_elevenlabs_key(new)
+            elif choice == "3":
                 try:
-                    index = int(input("Enter key number to remove: ").strip()) - 1
-                    self.config.remove_elevenlabs_key(index)
+                    self.config.remove_elevenlabs_key(int(input("Number to remove: ").strip()) - 1)
                 except ValueError:
-                    print("[ERROR] Invalid input!")
-            
-            elif choice == '4':
-                break
-    
-    def show_advanced_settings(self):
-        """Show and edit advanced settings"""
+                    print("[ERROR] Not a number.")
+            elif choice == "4":
+                return
+
+    # ---- voice / engine selection ----
+    def voice_setup(self):
+        while True:
+            tts = TTS(self.config)
+            backend = self.config.get("TTS_BACKEND")
+            online = tts._chatterbox_available()
+
+            print("\n" + "=" * 60)
+            print("VOICE SETUP")
+            print("=" * 60)
+            print(f"Engine        : {backend}")
+            print(f"Chatterbox    : {'running' if online else 'not running'}"
+                  f"  ({self.config.get('CHATTERBOX_URL')})")
+            mode = self.config.get("CHATTERBOX_MODE")
+            voice = self.config.get("CHATTERBOX_VOICE") or "(server default)"
+            print(f"  mode        : {mode} -> {voice}")
+            print(f"  emotion     : {self.config.get('CHATTERBOX_EXAGGERATION')}"
+                  f" (x{self.config.get('CHATTERBOX_URGENT_BOOST')} when critical)")
+            print(f"ElevenLabs    : voice {self.config.get('VOICE_ID') or 'not set'}")
+            print(f"Edge          : {self.config.get('EDGE_VOICE')}")
+
+            autostart = self.config.get("CHATTERBOX_AUTOSTART")
+            print(f"  autostart   : {autostart}"
+                  f"{' -> ' + self.config.get('CHATTERBOX_PATH') if autostart.lower() in ('1','true','yes','on') else ''}")
+
+            print("\n1. Switch engine")
+            print("2. Chatterbox - pick a built-in voice")
+            print("3. Chatterbox - clone a voice from an audio file")
+            print("4. Chatterbox - emotion levels")
+            print("5. Chatterbox - autostart the server")
+            print("6. ElevenLabs voice")
+            print("7. Edge voice")
+            print("8. Back")
+
+            choice = input("> ").strip()
+            if choice == "1":
+                self._pick_engine()
+            elif choice == "2":
+                self._pick_chatterbox_predefined(tts)
+            elif choice == "3":
+                self._pick_chatterbox_clone(tts)
+            elif choice == "4":
+                self._set_emotion()
+            elif choice == "5":
+                self._set_autostart()
+            elif choice == "6":
+                self._pick_elevenlabs(tts)
+            elif choice == "7":
+                self._pick_edge()
+            elif choice == "8":
+                return
+
+    def _set_autostart(self):
+        print("\nWhen on, starting the commentator also starts the Chatterbox server if it is")
+        print("not already running, and stops it again on exit.")
+
+        answer = input("Enable autostart? (y/n): ").strip().lower()
+        if answer not in ("y", "n"):
+            return
+
+        if answer == "n":
+            self.config.set("CHATTERBOX_AUTOSTART", "false")
+            print("[OK] Autostart off.")
+            return
+
+        current = self.config.get("CHATTERBOX_PATH")
+        prompt = f"Path to the Chatterbox-TTS-Server folder [{current or 'not set'}]: "
+        folder = input(prompt).strip().strip("'\"") or current
+
+        if not folder:
+            print("[ERROR] A path is required.")
+            return
+        if not (Path(folder).expanduser() / "server.py").is_file():
+            print(f"[ERROR] No server.py found in {folder}")
+            return
+
+        self.config.set("CHATTERBOX_PATH", folder)
+        self.config.set("CHATTERBOX_AUTOSTART", "true")
+        print("[OK] Autostart on.")
+
+    def _pick_engine(self):
+        engines = [
+            ("auto", "Chatterbox if running, else ElevenLabs, else Edge"),
+            ("chatterbox", "local GPU, emotional (falls back to Edge if it dies)"),
+            ("elevenlabs", "cloud, best quality, tight free limits"),
+            ("edge", "free, no key, no quota"),
+        ]
+        print()
+        for i, (name, description) in enumerate(engines, 1):
+            print(f"{i}. {name:12} {description}")
+
+        choice = input("> ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(engines):
+            name = engines[int(choice) - 1][0]
+            self.config.set("TTS_BACKEND", name)
+            print(f"[OK] Engine set to {name}.")
+
+    def _pick_chatterbox_predefined(self, tts):
+        if not tts._chatterbox_available():
+            print("\n[ERROR] Chatterbox server is not running.")
+            return
+
+        voices = tts.list_predefined_voices()
+        if not voices:
+            print("\nNo built-in voices reported by the server.")
+            return
+
+        print()
+        for i, name in enumerate(voices, 1):
+            print(f"{i}. {name}")
+
+        choice = input("\nPick a voice: ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= len(voices):
+            self.config.set("CHATTERBOX_MODE", "predefined")
+            self.config.set("CHATTERBOX_VOICE", voices[int(choice) - 1])
+            print(f"[OK] Voice set to {voices[int(choice) - 1]}.")
+
+    def _pick_chatterbox_clone(self, tts):
+        if not tts._chatterbox_available():
+            print("\n[ERROR] Chatterbox server is not running.")
+            return
+
+        existing = tts.list_reference_files()
+        print("\nReference clips already on the server:")
+        if existing:
+            for i, name in enumerate(existing, 1):
+                print(f"{i}. {name}")
+        else:
+            print("  (none yet)")
+        print("\n0. Upload a new .mp3 / .wav")
+
+        choice = input("> ").strip()
+
+        if choice == "0":
+            print("\nTip: a clean 10-30s clip of one person talking, no music, no background noise.")
+            path = input("Path to the audio file: ").strip().strip("'\"")
+            uploaded = tts.upload_reference(path)
+            if not uploaded:
+                return
+            self.config.set("CHATTERBOX_MODE", "clone")
+            self.config.set("CHATTERBOX_VOICE", uploaded)
+            print(f"[OK] Now cloning from {uploaded}.")
+            return
+
+        if choice.isdigit() and existing and 1 <= int(choice) <= len(existing):
+            name = existing[int(choice) - 1]
+            self.config.set("CHATTERBOX_MODE", "clone")
+            self.config.set("CHATTERBOX_VOICE", name)
+            print(f"[OK] Now cloning from {name}.")
+
+    def _set_emotion(self):
+        print("\n0 = monotone, 1 = normal, 2 = dramatic.")
+        print("Hear the difference first with:  python test_voice.py --emotions")
+
+        base = input(f"Normal level [{self.config.get('CHATTERBOX_EXAGGERATION')}]: ").strip()
+        if base:
+            try:
+                self.config.set("CHATTERBOX_EXAGGERATION", str(float(base)))
+            except ValueError:
+                print("[ERROR] Not a number.")
+
+        boost = input(f"Critical multiplier [{self.config.get('CHATTERBOX_URGENT_BOOST')}]: ").strip()
+        if boost:
+            try:
+                self.config.set("CHATTERBOX_URGENT_BOOST", str(float(boost)))
+            except ValueError:
+                print("[ERROR] Not a number.")
+
+    def _pick_elevenlabs(self, tts):
+        tts.list_elevenlabs_voices()
+        print("\nKnown free-tier Default voices:")
+        names = list(ELEVENLABS_DEFAULT_VOICES)
+        for i, name in enumerate(names, 1):
+            print(f"{i}. {name:10} {ELEVENLABS_DEFAULT_VOICES[name]}")
+
+        choice = input("\nPick a number, paste a voice id, or blank to skip: ").strip()
+        if not choice:
+            return
+        if choice.isdigit() and 1 <= int(choice) <= len(names):
+            name = names[int(choice) - 1]
+            self.config.set("VOICE_ID", ELEVENLABS_DEFAULT_VOICES[name])
+            print(f"[OK] Voice set to {name}.")
+        else:
+            self.config.set("VOICE_ID", choice)
+            print("[OK] Voice id saved.")
+
+    def _pick_edge(self):
+        common = [
+            "en-US-AriaNeural", "en-US-JennyNeural", "en-US-GuyNeural",
+            "en-GB-SoniaNeural", "fr-FR-DeniseNeural", "fr-FR-HenriNeural",
+        ]
+        print()
+        for i, name in enumerate(common, 1):
+            print(f"{i}. {name}")
+        print("\nFull list:  edge-tts --list-voices")
+
+        choice = input("\nPick a number or type a voice name: ").strip()
+        if not choice:
+            return
+        if choice.isdigit() and 1 <= int(choice) <= len(common):
+            self.config.set("EDGE_VOICE", common[int(choice) - 1])
+            print(f"[OK] Edge voice set to {common[int(choice) - 1]}.")
+        else:
+            self.config.set("EDGE_VOICE", choice)
+            print("[OK] Edge voice saved.")
+
+    def advanced_settings(self):
+        editable = [
+            ("GEMINI_MODEL", "Gemini model"),
+            ("TTS_BACKEND", "TTS backend (auto / chatterbox / elevenlabs / edge)"),
+            ("EDGE_VOICE", "Edge voice (free backend)"),
+            ("CHATTERBOX_URL", "Chatterbox server URL (local)"),
+            ("CHATTERBOX_VOICE", "Chatterbox voice"),
+            ("CHATTERBOX_MODE", "Chatterbox mode (predefined / clone)"),
+            ("CHATTERBOX_EXAGGERATION", "Emotion intensity (0 = flat, 1 = normal, 2 = dramatic)"),
+            ("CHATTERBOX_URGENT_BOOST", "Emotion multiplier on CRITICAL events"),
+            ("ELEVENLABS_MODEL", "ElevenLabs model"),
+            ("SYSTEM_PROMPT", "Personality prompt"),
+            ("LOG_DIRECTORY", "Log directory"),
+            ("VOICE_ID", "Voice ID"),
+            ("SEND_INTERVAL", "Idle send interval (s)"),
+            ("NOTABLE_DEBOUNCE", "Notable debounce (s)"),
+            ("CHECK_INTERVAL", "Log poll interval (s)"),
+            ("MAX_CHARS_PER_SEND", "Max characters per send"),
+            ("HISTORY_TURNS", "Conversation turns kept"),
+        ]
+
         while True:
             print("\n" + "=" * 60)
-            print("ADVANCED SETTINGS")
+            print("SETTINGS")
             print("=" * 60)
-            
-            # ElevenLabs Models info
-            models_info = {
-                "eleven_turbo_v2_5": "Turbo V2.5 (Fast) - ~500 chars/req",
-                "eleven_multilingual_v2": "Multilingual V2 - ~1000 chars/req",
-                "eleven_flash_v2_5": "Flash V2.5 (Ultra Fast) - ~250 chars/req",
-                "eleven_v3": "V3 Alpha (Most Expressive) - ~1000 chars/req"
-            }
-            
-            current_model = self.config.get('ELEVENLABS_MODEL')
-            model_display = models_info.get(current_model, current_model)
-            
-            print(f"1. Gemini Model: {self.config.get('GEMINI_MODEL')}")
-            print(f"2. ElevenLabs Model: {model_display}")
-            print(f"3. System Prompt: {self.config.get('SYSTEM_PROMPT')[:50]}...")
-            print(f"4. Check Interval: {self.config.get('CHECK_INTERVAL')} seconds")
-            print(f"5. Send Interval: {self.config.get('SEND_INTERVAL')} seconds")
-            print("6. Back to main menu")
-            
-            choice = input("\nSelect option to edit (1-6): ").strip()
-            
-            if choice == '1':
-                model = input("Enter Gemini model name: ").strip()
-                if model:
-                    self.config.set('GEMINI_MODEL', model)
-                    print("[SUCCESS] Gemini model updated!")
-            
-            elif choice == '2':
-                print("\n[ELEVENLABS MODELS]")
-                print("1. eleven_turbo_v2_5 (Turbo V2.5 - Fast) - ~500 chars/req")
-                print("2. eleven_multilingual_v2 (Multilingual V2) - ~1000 chars/req")
-                print("3. eleven_flash_v2_5 (Flash V2.5 - Ultra Fast) - ~250 chars/req")
-                print("4. eleven_v3 (V3 Alpha - Most Expressive) - ~1000 chars/req")
-                
-                model_choice = input("\nSelect model (1-4): ").strip()
-                models = {
-                    '1': 'eleven_turbo_v2_5',
-                    '2': 'eleven_multilingual_v2',
-                    '3': 'eleven_flash_v2_5',
-                    '4': 'eleven_v3'
-                }
-                
-                if model_choice in models:
-                    self.config.set('ELEVENLABS_MODEL', models[model_choice])
-                    print(f"[SUCCESS] ElevenLabs model updated to {models[model_choice]}!")
-            
-            elif choice == '3':
-                prompt = input("Enter system prompt: ").strip()
-                if prompt:
-                    self.config.set('SYSTEM_PROMPT', prompt)
-                    print("[SUCCESS] System prompt updated!")
-            
-            elif choice == '4':
-                interval = input("Enter check interval (seconds): ").strip()
-                if interval.isdigit():
-                    self.config.set('CHECK_INTERVAL', interval)
-                    print("[SUCCESS] Check interval updated!")
-            
-            elif choice == '5':
-                interval = input("Enter send interval (seconds): ").strip()
-                if interval.isdigit():
-                    self.config.set('SEND_INTERVAL', interval)
-                    print("[SUCCESS] Send interval updated!")
-            
-            elif choice == '6':
-                break
+            for i, (key, label) in enumerate(editable, 1):
+                value = self.config.get(key)
+                shown = value if len(value) <= 60 else value[:57] + "..."
+                print(f"{i:2}. {label}: {shown}")
+            print(f"{len(editable) + 1:2}. Back")
+
+            choice = input("\nEdit which? ").strip()
+            if not choice.isdigit():
+                continue
+            index = int(choice) - 1
+            if index == len(editable):
+                return
+            if 0 <= index < len(editable):
+                key, label = editable[index]
+                new = input(f"{label}: ").strip()
+                if new:
+                    self.config.set(key, new)
+                    print("[OK] Saved.")
 
 
-# ==================== MAIN APPLICATION ====================
-class MinecraftAICommentator:
-    """Main application"""
-    
+def mask(key):
+    return f"{key[:8]}...{key[-4:]}" if len(key) > 14 else "****"
+
+
+# ==================== APP ====================
+class App:
     def __init__(self):
         self.config = Config()
         self.wizard = SetupWizard(self.config)
-        self.ai_handler = None
-        self.log_watcher = None
-        self.last_send_time = time.time()
-    
+
     def run(self):
-        """Main entry point"""
         print("=" * 60)
         print("MINECRAFT AI COMMENTATOR")
         print("=" * 60)
-        
-        # Initial setup if needed
+
         if not self.config.is_configured():
             self.wizard.run_initial_setup()
-        
-        # Main menu
+
         while True:
-            print("\n" + "=" * 60)
-            print("MAIN MENU")
-            print("=" * 60)
-            print("1. Start AI Commentator")
-            print("2. Manage API Keys")
-            print("3. Advanced Settings")
-            print("4. Exit")
-            
-            choice = input("\nSelect option (1-4): ").strip()
-            
-            if choice == '1':
-                self._start_commentator()
-            elif choice == '2':
+            print("\n1. Start   2. Voice   3. API keys   4. Settings   5. Quit")
+            choice = input("> ").strip()
+            if choice == "1":
+                self.start()
+            elif choice == "2":
+                self.wizard.voice_setup()
+            elif choice == "3":
                 self.wizard.manage_api_keys()
-            elif choice == '3':
-                self.wizard.show_advanced_settings()
-            elif choice == '4':
-                print("\n[EXIT] Goodbye!")
-                break
-    
-    def _start_commentator(self):
-        """Start the AI commentator"""
-        print("\n" + "=" * 60)
-        print("STARTING AI COMMENTATOR")
-        print("=" * 60)
-        
-        # Initialize AI handler
-        self.ai_handler = AIHandler(self.config)
-        
-        # Ask about loading previous chat
-        chat_manager = ChatHistoryManager()
-        saved_chats = chat_manager.list_saved_chats()
-        
-        chat_history = None
-        if saved_chats:
-            print(f"\n[INFO] Found {len(saved_chats)} saved chat(s)")
-            print("0. Start fresh chat")
-            for i, chat_file in enumerate(saved_chats[:10], 1):
-                print(f"{i}. {chat_file}")
-            
-            choice = input("\nSelect chat to load (0 for fresh): ").strip()
-            if choice.isdigit() and 1 <= int(choice) <= len(saved_chats):
-                chat_history = chat_manager.load_chat(saved_chats[int(choice) - 1])
-        
-        # Initialize Gemini
-        self.ai_handler.init_gemini(chat_history)
-        
-        # Initialize log watcher
-        log_dir = self.config.get('LOG_DIRECTORY')
-        self.log_watcher = LogFileWatcher(log_dir)
-        
-        # Wait for log file if needed
-        if not self.log_watcher.find_log_file():
-            self.log_watcher.wait_for_log_file()
+            elif choice == "4":
+                self.wizard.advanced_settings()
+            elif choice == "5":
+                print("Bye.")
+                return
+
+    def start(self):
+        player = AudioPlayer()
+        if not player.available() and platform.system() != "Windows":
+            print("[WARN] No audio player found — install ffplay (ffmpeg), mpv or mpg123.")
+
+        launcher = self._maybe_start_chatterbox()
+        try:
+            self._run(player)
+        finally:
+            if launcher:
+                launcher.stop()
+
+    def _maybe_start_chatterbox(self):
+        """Returns the launcher only if we actually started a server, so we know to stop it."""
+        backend = self.config.get("TTS_BACKEND").lower()
+        if backend not in ("auto", "chatterbox"):
+            return None
+
+        launcher = ChatterboxLauncher(self.config)
+        if not launcher.enabled():
+            return None
+        if TTS(self.config)._chatterbox_available():
+            return None  # already running, not ours to manage
+
+        return launcher if launcher.start() else None
+
+    def _run(self, player):
+        ai = AIHandler(self.config, player)
+        tailer = LogTailer(self.config.get("LOG_DIRECTORY"))
+        commentator = Commentator(self.config, ai)
+
+        found = tailer.find_log()
+        if found:
+            tailer.attach(found)
         else:
-            self.log_watcher.log_file = self.log_watcher.find_log_file()
-            print(f"[FOUND] Using log file: {self.log_watcher.log_file}")
-        
-        # Initialize last content
-        self.log_watcher.last_content = self.log_watcher.read_file()
-        
-        # Main monitoring loop
-        self._monitoring_loop()
-    
-    def _monitoring_loop(self):
-        """Main monitoring loop"""
-        print("\n[START] Monitoring started...")
-        print(f"Check interval: {self.config.get('CHECK_INTERVAL')}s")
-        print(f"Auto-send interval: {self.config.get('SEND_INTERVAL')}s")
-        print("Triggers: CHAT or IMPORTANT in last line")
-        print("Press Ctrl+C to stop\n")
-        
+            tailer.wait_for_log()
+
+        interval = self.config.get_float("CHECK_INTERVAL")
+        print("\n[START] Watching. CRITICAL events interrupt, NOTABLE groups, INFO waits.")
+        print("Press Ctrl+C to stop.\n")
+
         try:
             while True:
-                current_content = self.log_watcher.read_file()
-                
-                if current_content != self.log_watcher.last_content:
-                    lines = current_content.strip().split('\n')
-                    
-                    if lines:
-                        last_line = lines[-1]
-                        
-                        # Check for CHAT or IMPORTANT in last line
-                        last_line_upper = last_line.upper()
-                        if "CHAT" in last_line_upper or "IMPORTANT" in last_line_upper:
-                            trigger = "CHAT" if "CHAT" in last_line_upper else "IMPORTANT"
-                            print(f"\n[TRIGGER] Detected '{trigger}' in last line!")
-                            
-                            old_lines = self.log_watcher.last_content.strip().split('\n') if self.log_watcher.last_content else []
-                            new_lines = lines[len(old_lines):]
-                            
-                            if new_lines:
-                                difference = '\n'.join(new_lines)
-                                print(f"[DIFF] New content:\n{difference}\n")
-                                self.ai_handler.send_message(difference)
-                                self.last_send_time = time.time()
-                            
-                            self.log_watcher.last_content = current_content
-                
-                # Auto-send timer
-                time_since_last_send = time.time() - self.last_send_time
-                send_interval = int(self.config.get('SEND_INTERVAL'))
-                
-                if time_since_last_send >= send_interval:
-                    print(f"\n[TIMER] {send_interval}s elapsed - Auto-send")
-                    
-                    old_lines = self.log_watcher.last_content.strip().split('\n') if self.log_watcher.last_content else []
-                    current_lines = current_content.strip().split('\n') if current_content else []
-                    
-                    if len(current_lines) > len(old_lines):
-                        new_lines = current_lines[len(old_lines):]
-                        difference = '\n'.join(new_lines)
-                        
-                        if difference.strip():
-                            print(f"[DIFF] New content:\n{difference}\n")
-                            self.ai_handler.send_message(difference)
-                    else:
-                        print("[INFO] No new content to send.")
-                    
-                    self.last_send_time = time.time()
-                    self.log_watcher.last_content = current_content
-                
-                time.sleep(int(self.config.get('CHECK_INTERVAL')))
-        
+                events = tailer.poll()
+                if events:
+                    for event in events:
+                        print(f"  · {event.get('lvl','?'):8} {event.get('msg','')}")
+                    commentator.ingest(events)
+                commentator.maybe_flush()
+                time.sleep(interval)
         except KeyboardInterrupt:
-            print("\n[STOP] Interrupted by user")
-        
-        finally:
-            # Save chat history
-            print("\n[SAVE] Saving chat history...")
-            self.ai_handler.save_chat_history()
-            print("\n[DONE] Monitoring stopped")
+            print("\n[STOP] Stopped.")
 
 
-# ==================== ENTRY POINT ====================
 if __name__ == "__main__":
-    app = MinecraftAICommentator()
-    app.run()
+    App().run()

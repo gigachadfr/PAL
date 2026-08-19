@@ -4,7 +4,7 @@
   "version": "${version}",
 
   "name": "PAL",
-  "description": "a mod to log player actions on the client side for the purpose of implementation with an LLM",
+  "description": "Logs what the local player does to a JSONL file, for LLM commentary. Client-side only: works in singleplayer and on servers, and only ever logs your own player.",
   "authors": [
     "giga_chad_77"
   ],
@@ -13,12 +13,11 @@
   },
 
   "license": "MIT",
-  "icon": "assets/playeractionlogger/icon.png",
 
   "environment": "client",
   "entrypoints": {
     "client": [
-      "com.yourmod.playeractionlogger.PlayerActionLogger"
+      "com.gigachad.pal.PlayerActionLogger"
     ]
   },
   "mixins": [
@@ -26,8 +25,9 @@
   ],
 
   "depends": {
-    "fabricloader": ">=0.15.3",
-    "minecraft": "1.20.4",
-    "java": ">=17"
+    "fabricloader": ">=0.16.5",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
   }
 }

@@ -1,0 +1,43 @@
+# ---- Secrets (NEVER commit these) ----
+.env
+*.env
+elevenlabs_keys.json
+python-script/chat_history/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# ---- Gradle / Java ----
+.gradle/
+build/
+out/
+run/
+*.class
+*.jar
+!mod/gradle/wrapper/gradle-wrapper.jar
+
+# ---- Fabric Loom ----
+.fabric/
+remappedSrc/
+
+# ---- IDE ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+
+# ---- Mod output logs ----
+logs/
+*.log

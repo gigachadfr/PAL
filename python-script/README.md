@@ -1,146 +1,190 @@
 # Minecraft AI Commentator
 
-An AI-powered commentator bot that watches your Minecraft gameplay logs and provides real-time commentary with voice synthesis. The bot uses Google's Gemini AI for intelligent responses and ElevenLabs for text-to-speech conversion.
-
-## Features
-
-- 📝 Real-time monitoring of Minecraft log files
-- 🤖 AI-powered commentary using Google Gemini
-- 🔊 Voice synthesis with ElevenLabs TTS
-- 💾 Chat history saving and loading
-- ⚙️ Configurable system prompts and intervals
-- 🎯 Trigger-based responses (CHAT and IMPORTANT keywords)
-- ⏰ Automatic timed updates
+Reads the JSONL log produced by the PAL mod and reacts to your gameplay out loud, using Google
+Gemini for the commentary and ElevenLabs for the voice.
 
 ## Prerequisites
 
-- Python 3.8 or higher
-- Minecraft 1.20.4 with the playeractionlogger mod or any mod that do a transcript with the same format
-- Google Gemini API key
-- ElevenLabs API key(you can add as many as you want) and Voice ID
+- Python 3.9+
+- Minecraft 1.21.1 with the PAL mod (or anything writing the same JSONL format)
+- A Google Gemini API key
+- An ElevenLabs API key (you can add several) and a Voice ID
+- An audio player: `ffplay` (from ffmpeg), `mpv`, or `mpg123`
 
-## Getting API Keys
+```bash
+pip install -r requirements.txt
+python ai_minecraft_bot.py
+```
 
-### Google Gemini API Key
+## Getting API keys
 
-1. Visit [Google AI Studio](https://makersuite.google.com/app/apikey)
-2. Sign in with your Google account
-3. Click "Create API Key"
-4. Copy your API key and save it securely
+**Gemini** — [Google AI Studio](https://aistudio.google.com/app/apikey) → Create API key.
+Free tier is generous enough for personal use.
 
-**Note:** Gemini API has a free tier with generous limits for personal use.
+**ElevenLabs** *(optional — see Voice below)* — [elevenlabs.io](https://elevenlabs.io/) →
+Profile Settings for the key. Free tier is 10,000 characters/month, which is why replies are
+capped at 1–2 sentences.
 
-### ElevenLabs API Key and Voice ID
+## Voice
 
-1. Visit [ElevenLabs](https://elevenlabs.io/)
-2. Sign up for a free account
-3. Navigate to your [Profile Settings](https://elevenlabs.io/app/settings)
-4. Find your API key under the "API Key" section
-5. To get a Voice ID:
-   - Go to [Voice Library](https://elevenlabs.io/app/voice-library)
-   - Choose a voice or create your own
-   - Click on the voice and copy the Voice ID from the URL or settings
+Three backends, switched with `TTS_BACKEND`:
 
-**Note:** Free tier only includes 10,000 characters per month.
+| Value | Behaviour |
+|---|---|
+| `auto` *(default)* | Local Chatterbox if its server answers → ElevenLabs → Edge |
+| `chatterbox` | Local GPU model, emotional. Falls back to Edge if the server dies mid-session |
+| `elevenlabs` | ElevenLabs, falling back to Edge |
+| `edge` | Edge only — free, no key, no character cap |
 
-## Configuration
+### Chatterbox (local, GPU, emotional) — recommended
 
-On first run, the application will guide you through an interactive setup wizard where you'll need to provide:
+[Chatterbox Turbo](https://www.resemble.ai/learn/models/chatterbox-turbo) is a 350M-parameter MIT
+model with **emotion exaggeration control**, ~75 ms latency and 6× realtime on a consumer GPU.
+Run it with [Chatterbox-TTS-Server](https://github.com/devnen/Chatterbox-TTS-Server):
 
-1. **Gemini API Key** - Your Google Gemini API key
-2. **ElevenLabs API Key** - Your ElevenLabs API key
-3. **Voice ID** - The ElevenLabs voice ID you want to use
-4. **Log Directory** - Full path to the directory containing Minecraft `.log` files
+```bash
+git clone https://github.com/devnen/Chatterbox-TTS-Server
+cd Chatterbox-TTS-Server && ./start.sh     # auto-detects the GPU, installs deps
+```
 
-### Advanced Settings
+It listens on `http://localhost:8004` — the default `CHATTERBOX_URL`. The bot probes it once at
+startup and silently uses another backend if it is not running.
 
-You can customize:
+**Autostart:** menu `Voice → 5` lets the bot start the server itself. Point it at the cloned
+folder and it will launch `server.py` (using the server's own virtualenv if there is one), wait
+until the model is loaded, then stop it again when you quit. It only stops a server it started —
+if you already had one running, it is left alone.
 
-- **Gemini Model** - Default: `gemini-2.0-flash`
-- **ElevenLabs Model** - Default: `Turbo V2.5`
-- **System Prompt** - Customize the AI's personality and behavior
-- **Check Interval** - How often to check for log changes (seconds)
-- **Send Interval** - Auto-send interval for updates (seconds)
+| Setting | Meaning |
+|---|---|
+| `CHATTERBOX_MODE` | `predefined` (built-in voice) or `clone` (your own sample) |
+| `CHATTERBOX_VOICE` | Voice id, or the reference audio filename when cloning |
+| `CHATTERBOX_EXAGGERATION` | `0` monotone → `1` normal → `2` dramatic |
+| `CHATTERBOX_URGENT_BOOST` | Multiplier applied on `CRITICAL` events |
 
-- **Multiple Eleven Labs API keys** - change when the current one is not working
+**Performance cues.** Chatterbox Turbo performs inline tags, in **square brackets**:
+`[laugh]` `[chuckle]` `[sigh]` `[gasp]` `[groan]` `[cough]` `[clear throat]` `[sniff]` `[shush]`.
+Any other syntax is read out loud instead, so the bot rewrites `<laugh>` and `(laughs)` to
+`[laugh]` before sending, and strips cues entirely for Edge and ElevenLabs, which do not support
+them. When the server is live the prompt invites the model to use one per reply.
 
-## Usage
+Set `CHATTERBOX_USE_TAGS=false` to disable the whole mechanism.
 
-1. Run the application:
-   ```bash
-   pip install requirements.txt
-   python ai_minecraft_bot.py
-   ```
+Note that audio length is a bad way to test this — a performed sigh lasts about as long as the
+spoken word "sigh". Use `test_tags.py`, which plays each syntax next to the spoken-word
+reference so you can judge by ear.
 
-2. Select "Start AI Commentator" from the main menu
+**Measured on an RTX 3060 Ti:** ~0.5 s per line once warm (the very first call takes ~8 s while
+CUDA warms up), and **4.8 GB of VRAM held for as long as the server runs**. That is the real
+constraint on an 8 GB card — see below.
 
-3. Choose whether to load a previous chat or start fresh
+**The emotion follows the event.** A death or a lit creeper is `CRITICAL`, so the bot multiplies
+the exaggeration by `CHATTERBOX_URGENT_BOOST` for that line — the same sentence gets delivered
+with more panic than a routine mining summary. This is why the mod tags events with a level in
+the first place.
 
-4. The bot will start monitoring your Minecraft logs
+### VRAM budget
 
-5. The AI will respond when:
-   - Keywords "CHAT" or "IMPORTANT" appear in new log lines
-   - The auto-send interval timer triggers
+The server holds ~4.8 GB for as long as it runs. On an 8 GB card that leaves roughly 3 GB for
+everything else, and desktop apps eat into it more than people expect (Discord ~0.6 GB, a
+Chromium browser ~0.3 GB, VS Code ~0.1 GB). Minecraft itself wants 1-1.5 GB vanilla, considerably
+more with shaders.
 
-6. Press `Ctrl+C` to stop monitoring (chat history will be saved automatically)
+If Minecraft stutters or fails to allocate: close the browser and Discord first, skip shaders,
+and keep the render distance moderate. If it still does not fit, set `TTS_BACKEND=edge` while you
+play — Edge uses no VRAM at all.
 
-## How It Works
+**Install note:** the server pins `torch==2.5.1+cu121`, which has no build for Python 3.13+. On a
+distro whose default `python3` is newer, `./start.sh` fails with *"No matching distribution found
+for torch"*. Run the launcher with an older interpreter instead — it creates its venv from
+whichever Python starts it:
 
-1. **Log Monitoring**: The bot continuously watches your specified log directory for `.log` files
-2. **Change Detection**: When new content is detected, it extracts the difference
-3. **AI Processing**: New content is sent to Gemini AI with your custom system prompt
-4. **Voice Synthesis**: The AI's response is converted to speech using ElevenLabs
-5. **Audio Playback**: The generated audio is automatically played
-6. **History Saving**: All conversations are saved for future reference
+```bash
+rm -rf venv && python3.11 start.py --nvidia
+```
 
-## Chat History
+## Testing the voice
 
-Chat histories are automatically saved in the `chat_history/` directory as JSON files. You can:
+`test_voice.py` speaks sample commentary without needing Gemini or Minecraft running:
 
-- Load previous conversations to continue where you left off
-- Review past interactions
-- Build upon previous context
+```bash
+python test_voice.py              # sample lines on the configured backend
+python test_voice.py --compare    # the same line through every backend, to A/B them
+python test_voice.py --emotions   # sweep the exaggeration dial to pick your values
+python test_voice.py --text "..." # your own line
+```
 
-## Audio Playback
+`--emotions` is the one to use for tuning: it says the same death line at exaggeration 0.5, 1.0,
+1.4 and 2.0 so you can hear the difference and choose `CHATTERBOX_EXAGGERATION` plus
+`CHATTERBOX_URGENT_BOOST`. It never writes to your `.env`.
 
-The application supports audio playback on:
+**Edge TTS** uses the neural voices behind Microsoft Edge's Read Aloud. No API key, no quota.
+Pick a voice with `EDGE_VOICE` (`en-US-AriaNeural`, `en-US-GuyNeural`, `fr-FR-DeniseNeural`,
+`fr-FR-HenriNeural`, …); run `edge-tts --list-voices` to see all ~200.
 
-- **Windows**: Uses default media player
-- **macOS**: Uses `afplay`
-- **Linux**: Uses `mpg123` (ensure it's installed: `sudo apt-get install mpg123`)
+**ElevenLabs on the free plan** has two traps:
+
+1. **Voice Library voices return HTTP 402.** Only the "Default" (premade) voices work over the
+   API without a paid plan. Menu option **4 (ElevenLabs voices)** lists what your account can
+   actually use — anything marked `premade` is safe — and lets you switch to one in one step.
+2. **10,000 characters/month is roughly 10 minutes of speech**, so a single long session can
+   exhaust it. When that happens in `auto` mode the bot switches to Edge and keeps talking
+   instead of going quiet.
+
+ElevenLabs has also announced that the current Default voices expire on **2026-12-31**, so
+`edge` is the safer long-term default.
+
+## How it decides when to speak
+
+The mod tags every event with a priority, and the bot acts on it:
+
+| Level | Behaviour |
+|---|---|
+| `CRITICAL` | Sent immediately and **interrupts** any clip currently playing (death, low health, lit creeper) |
+| `NOTABLE` | Triggers a send, debounced a few seconds so a burst becomes one comment |
+| `INFO` | Accumulated and sent when the idle timer fires |
+
+Every send also includes the latest `scene` line, so the AI always knows where you are and what
+time it is, not just what you did.
+
+## Settings
+
+Editable from the Settings menu (stored in `.env`):
+
+| Setting | Default | Notes |
+|---|---|---|
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Chosen for its free-tier rate limits, which are more forgiving during a busy session. Google retires older model ids fairly aggressively; if you get a 404 the error message names the current replacement |
+| `TTS_BACKEND` | `auto` | `auto` / `chatterbox` / `elevenlabs` / `edge` |
+| `EDGE_VOICE` | `en-US-AriaNeural` | Free backend voice |
+| `CHATTERBOX_*` | see Voice section | Local emotional TTS |
+| `ELEVENLABS_MODEL` | `eleven_turbo_v2_5` | |
+| `SYSTEM_PROMPT` | tsundere commentator | Your personality prompt. Output rules (length, no coordinates read aloud) are appended automatically, so you can rewrite this freely. |
+| `SEND_INTERVAL` | `45` | Idle timer, seconds |
+| `NOTABLE_DEBOUNCE` | `3` | Grouping window for NOTABLE events |
+| `CHECK_INTERVAL` | `0.5` | How often the log is polled |
+| `MAX_CHARS_PER_SEND` | `2000` | Budget per request; INFO lines are dropped first when over |
+| `HISTORY_TURNS` | `12` | Sliding conversation window, keeps token cost flat over a long session |
+
+A lower `SEND_INTERVAL` or a bigger model burns through your API quotas much faster.
+
+## How it reads the log
+
+The log is tailed by **byte offset**, not by re-reading the whole file, and the bot detects when
+Minecraft restarts and truncates it — it resynchronises instead of going silent. Torn lines
+(caught mid-write) are held until complete, and unparseable lines are skipped rather than fatal.
 
 ## Troubleshooting
 
-### No log file found
-- Ensure Minecraft is running and generating logs
-- Verify the log directory path is correct
-- Check that logging is enabled in your Minecraft settings
+**No log file found** — check the directory points at `logs/player_actions` inside your Minecraft
+folder, and that you have joined a world at least once with the mod installed.
 
-### API Errors
-- Verify your API keys are correct
-- Check your API quota limits
-- Ensure you have an active internet connection
+**No audio** — install ffmpeg (`sudo pacman -S ffmpeg`, `sudo apt install ffmpeg`). The bot warns
+at startup if it cannot find a player.
 
-### Audio not playing
-- **Linux users**: Install mpg123 (`sudo apt-get install mpg123`)
-- Check your system's audio settings
-- Verify audio drivers are working
+**ElevenLabs errors** — a 401 or 429 makes the bot rotate to your next key automatically. If every
+key fails it keeps commenting in the terminal without audio.
 
-## Example System Prompts
+## Security
 
-**Tsundere Commentator** (default):
-```
-context: Currently you only receive the logs of the users actions, you must act as if you were seeing their Minecraft gameplay directly. personality: you act like a tsundere and react to what the user is doing dont hesitate to trash them when they do something bad
-```
-
-## License
-
-This project is provided as-is for personal use.
-
-## Contributing
-
-Feel free to submit issues, fork the repository, and create pull requests for any improvements.
-
-## Disclaimer
-
-This bot requires active API keys from Google and ElevenLabs. Be mindful of your API usage limits and costs. The free tiers should be sufficient for casual use.
+`.env` and `elevenlabs_keys.json` hold your keys in plain text. Both are gitignored. Do not commit
+them, and do not paste them into issues.
