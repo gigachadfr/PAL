@@ -12,20 +12,23 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 /**
  * Container open/close, detected from screen transitions. Far cheaper and more reliable than
- * the old per-slot diffing, which copied up to 90 item stacks on every single click.
+ * per-slot diffing, which copied up to 90 item stacks on every single click.
  */
 @Mixin(Minecraft.class)
 public class MinecraftClientMixin {
 
-    @Shadow public Screen currentScreen;
+    /** The screen currently open — this is the one being replaced. */
+    @Shadow public Screen screen;
 
     @Inject(method = "setScreen", at = @At("HEAD"))
-    private void pal$onSetScreen(Screen screen, CallbackInfo ci) {
-        if (currentScreen instanceof AbstractContainerScreen<?> && !(screen instanceof AbstractContainerScreen<?>)) {
+    private void pal$onSetScreen(Screen newScreen, CallbackInfo ci) {
+        // `screen` is the outgoing screen, `newScreen` the incoming one. Keeping the two
+        // distinct is what makes the close case detectable at all.
+        if (screen instanceof AbstractContainerScreen<?> && !(newScreen instanceof AbstractContainerScreen<?>)) {
             PlayerActionLogger.onContainerClose();
         }
-        if (screen instanceof AbstractContainerScreen<?> handled) {
-            PlayerActionLogger.onContainerOpen(handled.getMenu());
+        if (newScreen instanceof AbstractContainerScreen<?> opened) {
+            PlayerActionLogger.onContainerOpen(opened.getMenu());
         }
     }
 }
