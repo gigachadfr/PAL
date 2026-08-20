@@ -10,10 +10,11 @@ if you made video with it please credit this project
 
 ## 🪶 Overview
 
-- **Minecraft Version:** 1.21.1
+- **Minecraft Version:** 26.1.2 — the `mc/1.21.1` branch builds the same mod for 1.21.1
 - **Mod Loader:** Fabric (client-side only)
 - **Log Location:** `<your minecraft folder>/logs/player_actions/session.log`
 - **Format:** JSONL — one JSON event per line
+- **Live state:** `player_state.json` in the same folder, rewritten every second
 - **Works in multiplayer:** yes, and it only ever logs your own player
 - **Python Script:** `ai_minecraft_bot.py` reads the log and reacts out loud
   (Gemini + ElevenLabs API keys required) — the mod works fine on its own too.
@@ -33,7 +34,7 @@ observe and comment on gameplay based on the log.
 
 ## 🧱 Installation
 
-1. Install **Fabric Loader** for Minecraft 1.21.1.
+1. Install **Fabric Loader** for Minecraft 26.1.2 (or 1.21.1 from the `mc/1.21.1` branch).
 2. Install **Fabric API** (required).
 3. Drop the PAL `.jar` into your `mods` folder.
 4. Launch the game — logging starts as soon as you join a world.
@@ -72,6 +73,44 @@ crafting milestones · advancements · chat sent and received · commands.
 
 Routine actions are **aggregated on purpose**: you get "mined 62 stone in 45s", not 62 separate
 lines. Drowning the interesting events in noise is what makes AI commentary go generic.
+
+---
+
+## 📸 The live state file
+
+Beside the log sits `player_state.json`, rewritten once a second. The log answers *what
+happened*; this answers *what is true right now* — and those are very different questions. A
+commentator reading only the log sees "Took 6 damage, health now 8/20" and is still calling you
+half dead twenty minutes and three golden apples later.
+
+```json
+{
+  "vitals":    { "health": 7.0, "max_health": 20.0, "health_state": "badly hurt",
+                 "hunger": 4, "armor": 9, "doing": "sprinting",
+                 "summary": "Health 7/20 (badly hurt), hunger 4/20 (hungry), armour 9, XP level 27." },
+  "effects":   [ { "name": "Regeneration", "level": 2, "seconds_left": 12 } ],
+  "equipment": { "main_hand": "Diamond Pickaxe (312/1561 durability left)" },
+  "inventory": { "slots_used": 3, "slots_free": 33, "items": [ { "name": "Diamond", "count": 4 } ] },
+  "stats":     { "deaths": 7, "killed_by": [ { "name": "Creeper", "count": 3 } ],
+                 "deaths_by_cause": [ { "cause": "the fall", "count": 2 } ] }
+}
+```
+
+It is written to a temporary file and moved into place, so a reader never catches it half
+written. Every section carries a ready-made `summary` sentence, so the bot never has to phrase
+raw numbers itself.
+
+**The statistics are Minecraft's own.** `deaths`, `killed_by`, `kills_by_creature`,
+`blocks_mined`, `hours_played` and the rest come straight from the vanilla counters the game has
+always kept — nothing is recounted or estimated. The client keeps them as a cache the server
+only refills on request, which is why vanilla's numbers look frozen unless you open the stats
+screen; the mod asks for a refresh every 30 seconds, and immediately after a death.
+
+Vanilla records **which creature** killed you and how often, but files every fall, lava bath and
+drop into the void under one undifferentiated death counter. `deaths_by_cause` fills that gap
+from the mod's own history in `deaths.json`, which survives across sessions. The cause is taken
+from the death message's *translation key*, not its text, so the tally is the same on a French
+client as on an English one.
 
 ---
 

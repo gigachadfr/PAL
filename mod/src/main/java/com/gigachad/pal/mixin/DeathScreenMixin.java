@@ -4,6 +4,7 @@ import com.gigachad.pal.PlayerActionLogger;
 import net.minecraft.client.gui.screens.DeathScreen;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.contents.TranslatableContents;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -19,6 +20,12 @@ public class DeathScreenMixin {
 
     @Inject(method = "<init>(Lnet/minecraft/network/chat/Component;ZLnet/minecraft/client/player/LocalPlayer;)V", at = @At("RETURN"))
     private void pal$onDeathScreen(Component message, boolean isHardcore, LocalPlayer player, CallbackInfo ci) {
-        PlayerActionLogger.onDeath(message == null ? "The player died" : message.getString());
+        // The translation key ("death.attack.lava") is the language-proof half of this: the
+        // rendered string is in the client's language, so the tally would be per-language.
+        String key = message != null && message.getContents() instanceof TranslatableContents contents
+                ? contents.getKey()
+                : null;
+        PlayerActionLogger.onDeath(
+                message == null ? "The player died" : message.getString(), key);
     }
 }

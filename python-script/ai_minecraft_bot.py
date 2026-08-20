@@ -48,6 +48,12 @@ CHAT_HISTORY_DIR = "chat_history"
 API_KEYS_FILE = "elevenlabs_keys.json"
 
 LOG_FILE_NAME = "session.log"
+# Live snapshot published by the mod next to the log, once a second.
+STATE_FILE_NAME = "player_state.json"
+# Stop trusting the snapshot after this long without an update: Minecraft has been closed.
+STATE_MAX_AGE_S = 90
+# A model that keeps asking for tools instead of answering is stuck; cut it off.
+MAX_TOOL_ROUNDS = 3
 
 # Appended to the user's own system prompt. Keeps replies short enough to be worth speaking,
 # and stops the model from reading out coordinates, which sound terrible as audio.
@@ -58,6 +64,19 @@ FORMAT_RULES = (
     "- Never read out raw coordinates or numbers like Y=-54; say 'deep underground' instead.\n"
     "- React to the most interesting thing that just happened; ignore the routine noise.\n"
     "- Never describe the log itself or mention that you are reading logs."
+)
+
+# Only appended when the mod publishes a state file. The two "do not" rules matter: without
+# them the model looks up the health it was just given, and every reply costs an extra round
+# trip for nothing.
+TOOL_RULES = (
+    "\n\nYou can look things up when it is worth it:\n"
+    "- check_inventory: what they are carrying, optionally filtered to one item\n"
+    "- check_stats: deaths in this world and what killed them, kills, blocks mined, time played\n"
+    "- check_player_state: armour, status effects, equipment and durability, what they are doing\n"
+    "Their health, hunger and location are already given to you in every message — never call a "
+    "tool to learn those. Look something up when they ask you a question about their game, or "
+    "when a real number would make the line land. Most replies need no tool at all."
 )
 
 # Chatterbox Turbo renders these natively — the syntax is SQUARE brackets, [laugh], as per the
@@ -107,6 +126,9 @@ DEFAULTS = {
     "NOTABLE_DEBOUNCE": "3",
     "MAX_CHARS_PER_SEND": "2000",
     "HISTORY_TURNS": "12",
+    # Lets the model call check_inventory / check_stats / check_player_state when it wants a
+    # fact. Costs one extra request per lookup, so it can be switched off.
+    "AI_TOOLS": "true",
     # Backend order in "auto": local Chatterbox if its server answers, then ElevenLabs, then Edge.
     # Force one with "chatterbox" / "elevenlabs" / "edge".
     "TTS_BACKEND": "auto",
@@ -532,6 +554,224 @@ class ChatHistory:
         if choice.isdigit() and 1 <= int(choice) <= min(10, len(saved)):
             return ChatHistory.load(saved[int(choice) - 1])
         return []
+
+
+# ==================== LIVE PLAYER STATE ====================
+class PlayerState:
+    """
+    Reads the snapshot the mod publishes beside the log, once a second.
+
+    The event log says what *happened*; this says what is *true*. Reading only the log, the
+    commentator had to infer the player's condition from the last damage line it saw — which is
+    why it kept insisting they were at death's door long after they had eaten, healed and moved
+    two biomes away. Everything here is a fresh read: the file is rewritten atomically, so a
+    read either gets the whole previous version or the whole new one.
+    """
+
+    def __init__(self, directory):
+        self.path = Path(directory) / STATE_FILE_NAME if directory else None
+        self._warned = False
+
+    def read(self):
+        """The parsed snapshot, or None when the mod is not publishing one."""
+        if not self.path or not self.path.is_file():
+            self._warn_once(
+                f"No {STATE_FILE_NAME} yet — live status and lookups need PAL 2.2 or newer."
+            )
+            return None
+        try:
+            state = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # Caught mid-rewrite, or written by a version we cannot parse. Next poll gets it.
+            return None
+
+        age = (time.time() * 1000 - state.get("updated_epoch_ms", 0)) / 1000
+        if age > STATE_MAX_AGE_S:
+            state["stale_seconds"] = int(age)
+        return state
+
+    def _warn_once(self, message):
+        if not self._warned:
+            self._warned = True
+            print(f"[STATE] {message}")
+
+    # ---- used on every send -------------------------------------------------
+
+    def context_line(self):
+        """One line on the player's condition, prepended to every prompt."""
+        state = self.read()
+        if not state:
+            return ""
+
+        parts = [state.get("vitals", {}).get("summary", "")]
+
+        effects = state.get("effects") or []
+        if effects:
+            parts.append("Effects: " + ", ".join(
+                f"{e.get('name')} {e.get('level')}" for e in effects) + ".")
+
+        location = state.get("location", {}).get("summary")
+        if location:
+            parts.append(location)
+
+        if not state.get("active", True):
+            parts.append("They have left the world; this is where they stopped.")
+        elif "stale_seconds" in state:
+            parts.append("(This is minutes old — Minecraft may have been closed.)")
+
+        return " ".join(part for part in parts if part)
+
+    # ---- what the model can ask for -----------------------------------------
+
+    def status_report(self):
+        state = self.read()
+        if not state:
+            return "No live status available; the mod is not running."
+
+        vitals = state.get("vitals", {})
+        lines = [vitals.get("summary", "")]
+        lines.append(f"Game mode {vitals.get('gamemode', '?')}, "
+                     f"difficulty {vitals.get('difficulty', '?')}.")
+
+        effects = state.get("effects") or []
+        lines.append("Status effects: " + (", ".join(
+            f"{e.get('name')} level {e.get('level')} "
+            f"({'permanent' if e.get('seconds_left') == -1 else str(e.get('seconds_left')) + 's left'})"
+            for e in effects) + "." if effects else "none."))
+
+        equipment = state.get("equipment", {})
+        worn = ", ".join(f"{slot.replace('_', ' ')}: {item}"
+                         for slot, item in equipment.items() if item and item != "nothing")
+        lines.append("Equipped: " + (worn if worn else "nothing at all."))
+        lines.append(state.get("location", {}).get("summary", ""))
+        return "\n".join(line for line in lines if line)
+
+    def inventory_report(self, item_filter=None):
+        state = self.read()
+        if not state:
+            return "No inventory available; the mod is not running."
+
+        inventory = state.get("inventory", {})
+        items = inventory.get("items") or []
+
+        if item_filter:
+            needle = str(item_filter).lower()
+            matches = [i for i in items if needle in i.get("name", "").lower()]
+            if not matches:
+                return f"They are carrying no {item_filter}."
+            found = ", ".join(f"{i['count']}x {i['name']}" for i in matches)
+            return f"They are carrying {found}."
+
+        report = [inventory.get("summary", "")]
+        report.append(f"Holding: {inventory.get('holding', 'nothing')}.")
+        equipment = state.get("equipment", {})
+        worn = ", ".join(f"{slot.replace('_', ' ')}: {item}"
+                         for slot, item in equipment.items() if item and item != "nothing")
+        if worn:
+            report.append(f"Wearing and holding: {worn}.")
+        return "\n".join(line for line in report if line)
+
+    def stats_report(self):
+        state = self.read()
+        if not state:
+            return "No statistics available; the mod is not running."
+
+        stats = state.get("stats") or {}
+        if not stats:
+            return "Statistics have not arrived from the server yet; try again in a moment."
+
+        lines = [stats.get("summary", "")]
+
+        killed_by = stats.get("killed_by") or []
+        if killed_by:
+            lines.append("Killed by: " + ", ".join(
+                f"{k['name']} x{k['count']}" for k in killed_by) + ".")
+
+        by_cause = stats.get("deaths_by_cause") or []
+        if by_cause:
+            lines.append("Deaths by cause: " + ", ".join(
+                f"{c['cause']} x{c['count']}" for c in by_cause) + ".")
+
+        recent = stats.get("recent_deaths") or []
+        if recent:
+            lines.append("Most recent deaths: " + "; ".join(
+                f"{d.get('message', 'died')} in {d.get('dimension', 'the world')} "
+                f"at Y={d.get('y', '?')} ({d.get('when', '')})" for d in recent[-4:]) + ".")
+
+        kills = stats.get("kills_by_creature") or []
+        if kills:
+            lines.append("Has killed: " + ", ".join(
+                f"{k['name']} x{k['count']}" for k in kills) + ".")
+
+        mined = stats.get("blocks_mined") or []
+        if mined:
+            lines.append("Blocks mined: " + ", ".join(
+                f"{b['name']} x{b['count']}" for b in mined) + ".")
+
+        lines.append(f"Damage taken {stats.get('damage_taken', 0)}, "
+                     f"dealt {stats.get('damage_dealt', 0)}, "
+                     f"walked {stats.get('blocks_walked', 0)} blocks.")
+        return "\n".join(line for line in lines if line)
+
+
+class AITools:
+    """
+    The three things the model may look up, and the plumbing to describe them to Gemini.
+
+    Declared without an automatic function-calling helper on purpose: the SDK's automatic mode
+    wants a Chat object, and this bot drives the conversation itself so it can keep the tool
+    round trips out of the saved history.
+    """
+
+    def __init__(self, state):
+        self.state = state
+
+    def declarations(self):
+        return [genai_types.Tool(function_declarations=[
+            genai_types.FunctionDeclaration(
+                name="check_inventory",
+                description=(
+                    "Look at what the player is carrying right now, including what is in their "
+                    "hands and the durability of their gear."
+                ),
+                parameters={
+                    "type": "OBJECT",
+                    "properties": {
+                        "item": {
+                            "type": "STRING",
+                            "description": (
+                                "Optional. Ask about one thing only, e.g. 'diamond', 'torch', "
+                                "'food'. Leave empty for the whole inventory."
+                            ),
+                        }
+                    },
+                },
+            ),
+            genai_types.FunctionDeclaration(
+                name="check_stats",
+                description=(
+                    "Minecraft's own statistics for this world: how many times the player has "
+                    "died and what killed them, what they have killed, blocks mined, distance "
+                    "walked, hours played."
+                ),
+            ),
+            genai_types.FunctionDeclaration(
+                name="check_player_state",
+                description=(
+                    "The player's condition beyond health and hunger: armour, active status "
+                    "effects, what they are wearing, and what they are currently doing."
+                ),
+            ),
+        ])]
+
+    def run(self, name, args):
+        if name == "check_inventory":
+            return self.state.inventory_report((args or {}).get("item"))
+        if name == "check_stats":
+            return self.state.stats_report()
+        if name == "check_player_state":
+            return self.state.status_report()
+        return f"There is no tool called {name}."
 
 
 # ==================== CHATTERBOX LAUNCHER ====================
@@ -1035,7 +1275,7 @@ class TTS:
 
 # ==================== AI ====================
 class AIHandler:
-    def __init__(self, config, player, history=None):
+    def __init__(self, config, player, history=None, state=None):
         self.config = config
         self.player = player
         self.tts = TTS(config)
@@ -1044,29 +1284,23 @@ class AIHandler:
         self.max_turns = config.get_int("HISTORY_TURNS")
         self.model = config.get("GEMINI_MODEL")
         self.system_prompt = config.get("SYSTEM_PROMPT") + FORMAT_RULES
+
+        # Offered on the setting alone, not on whether the state file exists yet: the bot is
+        # usually started before Minecraft, and probing here would silently disable lookups for
+        # the whole run. A missing file just makes a lookup answer "not available".
+        wanted = config.get("AI_TOOLS").lower() == "true"
+        self.tools = AITools(state) if wanted and state else None
+        if self.tools:
+            self.system_prompt += TOOL_RULES
+            print("[AI] Inventory, status and death statistics available as lookups.")
+
         if self.tts.supports_tags():
             self.system_prompt += PARALINGUISTIC_RULES
             print("[AI] Chatterbox is live — performance cues enabled in the prompt.")
 
     def comment(self, prompt_text, urgent=False):
         try:
-            contents = self.history + [
-                genai_types.Content(role="user", parts=[genai_types.Part(text=prompt_text)])
-            ]
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=contents,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=self.system_prompt,
-                    max_output_tokens=200,
-                    # We pass no tools, so the SDK's automatic function calling has nothing to
-                    # do — turning it off silences its "use Chat.send_message instead" warning.
-                    automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
-                        disable=True
-                    ),
-                ),
-            )
-            reply = (response.text or "").strip()
+            reply = self._generate(prompt_text)
         except Exception as e:
             print(f"[ERROR] Gemini call failed: {e}")
             return
@@ -1083,6 +1317,62 @@ class AIHandler:
         audio = self.tts.synthesize(reply, urgent=urgent)
         if audio:
             self.player.play(audio, interrupt=urgent)
+
+    def _generate(self, prompt_text):
+        """
+        One reply, going round again for each batch of lookups the model asks for.
+
+        Tool round trips are deliberately not kept: the saved conversation stays a readable
+        exchange, and the model does not re-read a stale inventory from ten minutes ago.
+        """
+        contents = self.history + [
+            genai_types.Content(role="user", parts=[genai_types.Part(text=prompt_text)])
+        ]
+
+        for _ in range(MAX_TOOL_ROUNDS):
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=self._request_config(),
+            )
+
+            calls = list(getattr(response, "function_calls", None) or [])
+            if not calls:
+                return (response.text or "").strip()
+            if not response.candidates:
+                return ""
+
+            answers = []
+            for call in calls:
+                result = self.tools.run(call.name, dict(call.args or {}))
+                print(f"[TOOL] {call.name}({dict(call.args or {})}) -> "
+                      f"{result.splitlines()[0][:90] if result else 'nothing'}")
+                answers.append(genai_types.Part.from_function_response(
+                    name=call.name, response={"result": result}))
+
+            contents = contents + [
+                response.candidates[0].content,
+                genai_types.Content(role="user", parts=answers),
+            ]
+
+        print("[WARN] The model kept asking for lookups instead of answering; skipping this one.")
+        return ""
+
+    def _request_config(self):
+        settings = {
+            "system_instruction": self.system_prompt,
+            # Enough room for a lookup and a short reply. The 1-2 sentence rule caps the
+            # spoken part regardless.
+            "max_output_tokens": 400 if self.tools else 200,
+            # This bot drives the tool loop itself, so the SDK's automatic mode stays off —
+            # which also silences its "use Chat.send_message instead" warning.
+            "automatic_function_calling": genai_types.AutomaticFunctionCallingConfig(
+                disable=True
+            ),
+        }
+        if self.tools:
+            settings["tools"] = self.tools.declarations()
+        return genai_types.GenerateContentConfig(**settings)
 
     def _remember(self, prompt_text, reply):
         self.history.append(
@@ -1101,9 +1391,10 @@ class AIHandler:
 class Commentator:
     """Applies the send policy: CRITICAL now, NOTABLE debounced, INFO on the timer."""
 
-    def __init__(self, config, ai):
+    def __init__(self, config, ai, state=None):
         self.config = config
         self.ai = ai
+        self.state = state
         self.pending = []
         self.scene = None
         self.last_send = time.time()
@@ -1154,8 +1445,14 @@ class Commentator:
         if not body:
             return
 
+        # The live snapshot is read now, at send time, so the model is told the health the
+        # player has when it speaks rather than the health they had when they were hit. The
+        # scene line is only a fallback: it is throttled to 25s, so it can be stale too.
+        status = self.state.context_line() if self.state else ""
         prompt = ""
-        if self.scene:
+        if status:
+            prompt += f"[PLAYER RIGHT NOW] {status}\n"
+        elif self.scene:
             prompt += f"[WHERE THEY ARE] {self.scene}\n"
         prompt += f"[WHAT JUST HAPPENED]\n{body}"
 
@@ -1672,9 +1969,10 @@ class App:
         self._run(player)
 
     def _run(self, player):
-        ai = AIHandler(self.config, player, history=ChatHistory.choose())
+        state = PlayerState(self.config.get("LOG_DIRECTORY"))
+        ai = AIHandler(self.config, player, history=ChatHistory.choose(), state=state)
         tailer = LogTailer(self.config.get("LOG_DIRECTORY"))
-        commentator = Commentator(self.config, ai)
+        commentator = Commentator(self.config, ai, state=state)
 
         found = tailer.find_log()
         if found:

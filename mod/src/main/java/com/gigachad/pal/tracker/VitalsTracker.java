@@ -36,6 +36,7 @@ public class VitalsTracker implements Tracker {
     private long levelSettleAt = 0L;
     private boolean lowHealthFlagged = false;
     private boolean starvingFlagged = false;
+    private boolean dippedBelowHalf = false;
 
     @Override
     public void onSessionStart(LocalPlayer player, EventLog log) {
@@ -47,6 +48,7 @@ public class VitalsTracker implements Tracker {
         lastFallDistance = 0.0;
         lowHealthFlagged = false;
         starvingFlagged = false;
+        dippedBelowHalf = false;
     }
 
     @Override
@@ -94,6 +96,17 @@ public class VitalsTracker implements Tracker {
             }
         } else if (health >= maxHealth * RECOVERED_FRACTION) {
             lowHealthFlagged = false;
+        }
+
+        // ---- recovery -----------------------------------------------------
+        // Damage is logged, healing never was, so the log's last word on the player's health
+        // stayed "took 6 damage, 8 left" for the rest of the session. Announced once per dip,
+        // which costs one line per fight at most.
+        if (health >= maxHealth && dippedBelowHalf) {
+            dippedBelowHalf = false;
+            log.log(Level.INFO, "recovered", "Back to full health.");
+        } else if (health < maxHealth * 0.5f) {
+            dippedBelowHalf = true;
         }
 
         // ---- hunger -------------------------------------------------------

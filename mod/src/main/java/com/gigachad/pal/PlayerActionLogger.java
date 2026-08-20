@@ -2,8 +2,12 @@ package com.gigachad.pal;
 
 import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
+import com.gigachad.pal.state.DeathHistory;
+import com.gigachad.pal.state.StateExporter;
 import com.gigachad.pal.tracker.*;
+import com.gigachad.pal.util.Causes;
 import com.gigachad.pal.util.Names;
+import com.gigachad.pal.context.WorldContext;
 import net.minecraft.world.damagesource.DamageSource;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -50,8 +54,13 @@ public class PlayerActionLogger implements ClientModInitializer {
     private static final ContainerTracker CONTAINER = new ContainerTracker();
     private static final ProgressTracker PROGRESS = new ProgressTracker();
 
+    /** Deaths kept across sessions, so "how many times have I died to lava" has an answer. */
+    private static final DeathHistory DEATHS = new DeathHistory();
+    /** Publishes the live snapshot the bot reads when it needs a fact rather than an event. */
+    private static final StateExporter STATE = new StateExporter(DEATHS);
+
     private static final List<Tracker> TRACKERS =
-            List.of(SCENE, VITALS, DANGER, LOOK, MINING, BUILD, COMBAT, CONTAINER, PROGRESS);
+            List.of(SCENE, VITALS, DANGER, LOOK, MINING, BUILD, COMBAT, CONTAINER, PROGRESS, STATE);
 
     private static boolean sessionActive = false;
     private static long tickCount = 0L;
@@ -120,6 +129,7 @@ public class PlayerActionLogger implements ClientModInitializer {
 
         localPlayerUuid = player.getUUID();
         hostMode = client.hasSingleplayerServer();
+        DEATHS.load();
 
         LOG.start(player.getGameProfile().name(), describeWorld(client));
         LOGGER.info("Session started ({} mode)", hostMode ? "host, exact events" : "client, inferred events");
@@ -159,7 +169,8 @@ public class PlayerActionLogger implements ClientModInitializer {
         }
     }
 
-    private static String describeWorld(Minecraft client) {
+    /** Public because {@code StateExporter} labels its snapshot with the same world name. */
+    public static String describeWorld(Minecraft client) {
         if (client.hasSingleplayerServer()) {
             IntegratedServer server = client.getSingleplayerServer();
             return server != null
@@ -207,12 +218,25 @@ public class PlayerActionLogger implements ClientModInitializer {
         if (sessionActive && player != null) CONTAINER.onClose(player, LOG);
     }
 
-    /** Called with the game's own death message, so the cause is always exact. */
-    public static void onDeath(String deathMessage) {
+    /**
+     * Called with the game's own death message, so the cause is always exact.
+     *
+     * @param translationKey the message's translation key ({@code death.attack.fall}), which is
+     *                       what the history buckets on — the rendered message is in whatever
+     *                       language the client runs in.
+     */
+    public static void onDeath(String deathMessage, String translationKey) {
         if (!sessionActive) return;
         LocalPlayer player = Minecraft.getInstance().player;
         String where = player == null ? "" : String.format(" at Y=%d", player.blockPosition().getY());
         LOG.log(Level.CRITICAL, "death", String.format("DIED: %s%s.", deathMessage, where));
+
+        if (player != null) {
+            DEATHS.record(deathMessage, translationKey, describeWorld(Minecraft.getInstance()),
+                    WorldContext.of(player).dimension(), player.blockPosition().getY());
+        }
+        // The server only resends statistics when asked, and the death counter has just moved.
+        STATE.invalidateStats();
     }
 
     public static EventLog log() {
@@ -271,24 +295,6 @@ public class PlayerActionLogger implements ClientModInitializer {
             return "a " + name;
         }
 
-        return switch (source.getMsgId()) {
-            case "inWall" -> "suffocation";
-            case "cactus" -> "a cactus";
-            case "drown" -> "drowning";
-            case "onFire", "inFire" -> "fire";
-            case "lava" -> "lava";
-            case "hotFloor" -> "magma";
-            case "fall" -> "the fall";
-            case "flyIntoWall" -> "flying into a wall";
-            case "starve" -> "starvation";
-            case "outOfWorld" -> "the void";
-            case "sweetBerryBush" -> "a berry bush";
-            case "freeze" -> "the cold";
-            case "explosion", "explosion.player" -> "an explosion";
-            case "lightningBolt" -> "a lightning bolt";
-            case "magic" -> "magic";
-            case "wither" -> "wither";
-            default -> Names.prettify(source.getMsgId()).toLowerCase();
-        };
+        return Causes.phrase(source.getMsgId());
     }
 }

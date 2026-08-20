@@ -6,7 +6,7 @@ Gemini for the commentary and ElevenLabs for the voice.
 ## Prerequisites
 
 - Python 3.9+
-- Minecraft 1.21.1 with the PAL mod (or anything writing the same JSONL format)
+- Minecraft with the PAL mod (or anything writing the same JSONL format)
 - A Google Gemini API key
 - An ElevenLabs API key (you can add several) and a Voice ID
 - An audio player: `ffplay` (from ffmpeg), `mpv`, or `mpg123`
@@ -156,6 +156,50 @@ earlier session instead of meeting you for the first time again.
 
 Saves are plain `{role, text}` JSON: readable, editable, and independent of the SDK.
 
+## What the AI knows, and what it can look up
+
+**Every message includes the player's condition at the moment of sending**, read fresh from the
+mod's `player_state.json`:
+
+```
+[PLAYER RIGHT NOW] Health 7/20 (badly hurt), hunger 4/20 (hungry), armour 9, XP level 27.
+                   On fire. Sprinting. Effects: Regeneration 2. Under cover at Y=38 in a
+                   Crimson Forest, in the Nether, day.
+[WHAT JUST HAPPENED]
+21:15:19 [CRITICAL] A Creeper is hissing 2 blocks away, about to explode.
+```
+
+This is the fix for a commentator that kept getting your health wrong. It used to infer your
+condition from the last damage line in the log, so it went on describing you as nearly dead long
+after you had healed — and it read the location from the `scene` line, which is throttled to 25
+seconds and so could be a biome out of date.
+
+**Three lookups** are offered to the model as tools, for facts it is not given up front:
+
+| Tool | Answers |
+|---|---|
+| `check_inventory` | What you are carrying, what is in your hands, gear durability. Takes an optional item filter |
+| `check_stats` | Deaths in this world and what killed you, kills, blocks mined, distance walked, hours played |
+| `check_player_state` | Armour, status effects, equipment, what you are doing right now |
+
+The model decides when to use them, and mostly does not — the prompt tells it your health and
+location are already provided, so it does not spend a round trip re-reading them. It reaches for
+one when you ask it something ("do I have any iron?") or when a real number would make a line
+land ("that's the fourth creeper this week").
+
+A lookup costs one extra request, which shows in the terminal:
+
+```
+[TOOL] check_stats({}) -> Has died 7 times in this world, most often to a Creeper (3)…
+[AI] Fourth time a creeper has done that to you. At some point that stops being bad luck.
+```
+
+Set `AI_TOOLS=false` to turn all three off. Lookups need PAL 2.2 or newer; with an older mod the
+bot says so once at startup and the tools answer "not available".
+
+Tool round trips are not written to the conversation history, so a saved chat stays a readable
+exchange and the model never re-reads an inventory from twenty minutes ago.
+
 ## How it decides when to speak
 
 The mod tags every event with a priority, and the bot acts on it:
@@ -188,6 +232,7 @@ Editable from the Settings menu (stored in `.env`):
 | `CHECK_INTERVAL` | `0.5` | How often the log is polled |
 | `MAX_CHARS_PER_SEND` | `2000` | Budget per request; INFO lines are dropped first when over |
 | `HISTORY_TURNS` | `12` | Sliding conversation window, keeps token cost flat over a long session |
+| `AI_TOOLS` | `true` | Lets the model look up inventory, statistics and status. Needs PAL 2.2+ |
 
 A lower `SEND_INTERVAL` or a bigger model burns through your API quotas much faster.
 
@@ -201,6 +246,13 @@ Minecraft restarts and truncates it — it resynchronises instead of going silen
 
 **No log file found** — check the directory points at `logs/player_actions` inside your Minecraft
 folder, and that you have joined a world at least once with the mod installed.
+
+**"No player_state.json yet"** — the same directory, from PAL 2.2 onwards. Until it appears the
+bot still works, but it comments without knowing your health and the three lookups return
+"not available".
+
+**The AI says the statistics are not available yet** — the client asks the server for them every
+30 seconds, so they are empty for the first few seconds after joining a world.
 
 **No audio** — install ffmpeg (`sudo pacman -S ffmpeg`, `sudo apt install ffmpeg`). The bot warns
 at startup if it cannot find a player.
