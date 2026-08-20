@@ -50,7 +50,7 @@ cd Chatterbox-TTS-Server && ./start.sh     # auto-detects the GPU, installs deps
 It listens on `http://localhost:8004` — the default `CHATTERBOX_URL`. The bot probes it once at
 startup and silently uses another backend if it is not running.
 
-**Autostart:** menu `Voice → 5` lets the bot start the server itself. Point it at the cloned
+**Autostart:** menu `Voice → 6` lets the bot start the server itself. Point it at the cloned
 folder and it will launch `server.py` (using the server's own virtualenv if there is one), wait
 until the model is loaded, then stop it again when you quit. It only stops a server it started —
 if you already had one running, it is left alone.
@@ -59,7 +59,7 @@ if you already had one running, it is left alone.
 |---|---|
 | `CHATTERBOX_MODE` | `predefined` (built-in voice) or `clone` (your own sample) |
 | `CHATTERBOX_VOICE` | Voice id, or the reference audio filename when cloning |
-| `CHATTERBOX_EXAGGERATION` | `0` monotone → `1` normal → `2` dramatic |
+| `CHATTERBOX_EXAGGERATION` | `0` monotone → `1` normal → `2` dramatic. Higher works too; the boosted value is capped at 5 and can never end up below your normal level |
 | `CHATTERBOX_URGENT_BOOST` | Multiplier applied on `CRITICAL` events |
 
 **Performance cues.** Chatterbox Turbo performs inline tags, in **square brackets**:
@@ -129,7 +129,7 @@ Pick a voice with `EDGE_VOICE` (`en-US-AriaNeural`, `en-US-GuyNeural`, `fr-FR-De
 **ElevenLabs on the free plan** has two traps:
 
 1. **Voice Library voices return HTTP 402.** Only the "Default" (premade) voices work over the
-   API without a paid plan. Menu option **4 (ElevenLabs voices)** lists what your account can
+   API without a paid plan. Menu option **Voice → 7** lists what your account can
    actually use — anything marked `premade` is safe — and lets you switch to one in one step.
 2. **10,000 characters/month is roughly 10 minutes of speech**, so a single long session can
    exhaust it. When that happens in `auto` mode the bot switches to Edge and keeps talking
