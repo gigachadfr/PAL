@@ -78,7 +78,11 @@ PARALINGUISTIC_RULES = (
 # are the real syntax; angle brackets are matched so a model slip can be repaired rather than
 # spoken. Anything else in brackets is left alone.
 _TAG_ALTERNATION = "|".join(re.escape(t) + "(?:es|s)?" for t in PARALINGUISTIC_TAGS)
-EXAGGERATION_CEILING = 5.0
+# Ranges enforced by the server (models.py), which took them from Chatterbox's Gradio app.
+# Sending values outside them is untested territory and makes synthesis unreliable.
+EXAGGERATION_MIN, EXAGGERATION_MAX = 0.25, 2.0
+CFG_WEIGHT_MIN, CFG_WEIGHT_MAX = 0.2, 1.0
+EXAGGERATION_CEILING = EXAGGERATION_MAX
 
 TAG_PATTERN = re.compile(rf"[\[<]\s*(?:{_TAG_ALTERNATION})\s*[\]>]", re.IGNORECASE)
 PAREN_TAG_PATTERN = re.compile(rf"\(\s*(?:{_TAG_ALTERNATION})\s*\)", re.IGNORECASE)
@@ -111,9 +115,11 @@ DEFAULTS = {
     "CHATTERBOX_URL": "http://localhost:8004",
     "CHATTERBOX_MODE": "predefined",  # "predefined" or "clone"
     "CHATTERBOX_VOICE": "",  # predefined voice id, or reference audio filename when cloning
-    "CHATTERBOX_EXAGGERATION": "1.0",  # 0 = monotone, higher = more dramatic
+    "CHATTERBOX_EXAGGERATION": "0.8",  # 0.25-2.0; 0.5 is neutral, higher is dramatic
     "CHATTERBOX_TEMPERATURE": "0.75",
-    "CHATTERBOX_CFG_WEIGHT": "3.0",
+    # 0.2-1.0. Lower slows the delivery down, which offsets the speed-up that a high
+    # exaggeration causes. The docs suggest ~0.3 when going for expressive.
+    "CHATTERBOX_CFG_WEIGHT": "0.4",
     # Multiplier applied to exaggeration on CRITICAL events (death, creeper, low health).
     "CHATTERBOX_URGENT_BOOST": "1.4",
     # Start the server automatically when it is not already running.
@@ -427,6 +433,10 @@ class AudioPlayer:
                 pass
 
 
+def _clamp(value, low, high):
+    return max(low, min(high, value))
+
+
 def _describe_free_vram():
     """Best-effort VRAM reading, so a failed load says why rather than just timing out."""
     try:
@@ -682,8 +692,14 @@ class TTS:
         try:
             exaggeration = float(self.config.get("CHATTERBOX_EXAGGERATION"))
             boost = float(self.config.get("CHATTERBOX_URGENT_BOOST"))
+            cfg_weight = float(self.config.get("CHATTERBOX_CFG_WEIGHT"))
         except ValueError:
-            exaggeration, boost = 1.0, 1.4
+            exaggeration, boost, cfg_weight = 0.8, 1.4, 0.4
+
+        # Out-of-range values are not rejected by the server, they just make it behave
+        # unpredictably — so clamp rather than pass them through.
+        exaggeration = _clamp(exaggeration, EXAGGERATION_MIN, EXAGGERATION_MAX)
+        cfg_weight = _clamp(cfg_weight, CFG_WEIGHT_MIN, CFG_WEIGHT_MAX)
 
         # A death or a lit creeper should not be read in the same tone as "mined 60 stone".
         # The ceiling must never drag the boosted value below the normal one: with a normal
@@ -697,7 +713,7 @@ class TTS:
             "output_format": "mp3",
             "exaggeration": exaggeration,
             "temperature": float(self.config.get("CHATTERBOX_TEMPERATURE")),
-            "cfg_weight": float(self.config.get("CHATTERBOX_CFG_WEIGHT")),
+            "cfg_weight": cfg_weight,
             "speed_factor": 1.0,
             "language": "en",
             "stream": False,
@@ -1388,8 +1404,23 @@ class SetupWizard:
             print(f"[OK] Now cloning from {name}.")
 
     def _set_emotion(self):
-        print("\n0 = monotone, 1 = normal, 2 = dramatic.")
-        print("Hear the difference first with:  python test_voice.py --emotions")
+        current = self.config.get("CHATTERBOX_EXAGGERATION")
+        cfg = self.config.get("CHATTERBOX_CFG_WEIGHT")
+        print(f"\nExaggeration must be {EXAGGERATION_MIN}-{EXAGGERATION_MAX}: 0.5 is neutral,")
+        print("0.4-0.6 conversational, above that increasingly dramatic.")
+        print("Anything outside that range is clamped before it reaches the server.")
+        print(f"\nTip from the Chatterbox docs: for expressive delivery, raise exaggeration to")
+        print(f"0.7+ AND lower cfg_weight to about 0.3 — high exaggeration speeds the voice up,")
+        print(f"and a lower cfg_weight slows it back down. cfg_weight is {cfg} "
+              f"(valid {CFG_WEIGHT_MIN}-{CFG_WEIGHT_MAX}, in Settings).")
+
+        try:
+            if not EXAGGERATION_MIN <= float(current) <= EXAGGERATION_MAX:
+                print(f"\n[WARN] Your current value ({current}) is out of range and is being "
+                      f"clamped to {EXAGGERATION_MAX}.")
+        except ValueError:
+            pass
+        print("\nHear the difference first with:  python test_voice.py --emotions")
 
         base = input(f"Normal level [{self.config.get('CHATTERBOX_EXAGGERATION')}]: ").strip()
         if base:
@@ -1451,8 +1482,9 @@ class SetupWizard:
             ("CHATTERBOX_URL", "Chatterbox server URL (local)"),
             ("CHATTERBOX_VOICE", "Chatterbox voice"),
             ("CHATTERBOX_MODE", "Chatterbox mode (predefined / clone)"),
-            ("CHATTERBOX_EXAGGERATION", "Emotion intensity (0 = flat, 1 = normal, 2 = dramatic)"),
+            ("CHATTERBOX_EXAGGERATION", "Emotion intensity (0.25-2.0, 0.5 = neutral)"),
             ("CHATTERBOX_URGENT_BOOST", "Emotion multiplier on CRITICAL events"),
+            ("CHATTERBOX_CFG_WEIGHT", "Pacing / voice adherence (0.2-1.0, lower = slower)"),
             ("ELEVENLABS_MODEL", "ElevenLabs model"),
             ("SYSTEM_PROMPT", "Personality prompt"),
             ("LOG_DIRECTORY", "Log directory"),

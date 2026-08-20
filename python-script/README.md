@@ -59,8 +59,18 @@ if you already had one running, it is left alone.
 |---|---|
 | `CHATTERBOX_MODE` | `predefined` (built-in voice) or `clone` (your own sample) |
 | `CHATTERBOX_VOICE` | Voice id, or the reference audio filename when cloning |
-| `CHATTERBOX_EXAGGERATION` | `0` monotone → `1` normal → `2` dramatic. Higher works too; the boosted value is capped at 5 and can never end up below your normal level |
+| `CHATTERBOX_EXAGGERATION` | **0.25–2.0**. 0.5 neutral, 0.4–0.6 conversational, higher is dramatic. Values outside the range are clamped |
+| `CHATTERBOX_CFG_WEIGHT` | **0.2–1.0**. Lower slows the delivery and sticks closer to the reference voice |
 | `CHATTERBOX_URGENT_BOOST` | Multiplier applied on `CRITICAL` events |
+
+**Tuning the two together.** The Chatterbox docs are explicit that these are not independent:
+for expressive delivery, raise `exaggeration` to 0.7+ *and* lower `cfg_weight` to about 0.3 —
+a high exaggeration speeds the voice up, and a lower cfg_weight slows it back down. Raising
+exaggeration alone gives a fast, rushed read.
+
+The ranges come from the server's own validation, which took them from Chatterbox's Gradio app.
+Out-of-range values are not rejected outright, they just make output unpredictable, so the bot
+clamps them.
 
 **Performance cues.** Chatterbox Turbo performs inline tags, in **square brackets**:
 `[laugh]` `[chuckle]` `[sigh]` `[gasp]` `[groan]` `[cough]` `[clear throat]` `[sniff]` `[shush]`.
