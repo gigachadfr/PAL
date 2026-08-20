@@ -480,22 +480,52 @@ class ChatterboxLauncher:
             print(f"[CHATTERBOX] No server.py in {folder}")
             return False
 
+        # A server whose model failed to load still answers the port and still holds its VRAM.
+        # Starting a second one just fails on "address already in use", so say so instead.
+        if self._port_in_use():
+            print("[CHATTERBOX] Something is already listening on that port, but its model is")
+            print("[CHATTERBOX] not loaded — usually it ran out of VRAM when it started.")
+            print("[CHATTERBOX] Stop it and try again:  pkill -f Chatterbox-TTS-Server")
+            return False
+
         python = self._find_python(folder)
         print(f"[CHATTERBOX] Starting server from {folder} ...")
         print("[CHATTERBOX] First run loads the model onto the GPU, this can take a minute.")
 
+        # Keep the output: without it a failed start gives nothing to diagnose.
+        self._log_path = Path(tempfile.gettempdir()) / "chatterbox-server.log"
         try:
+            self._log_handle = open(self._log_path, "w", encoding="utf-8")
             self.process = subprocess.Popen(
                 [python, "server.py"],
                 cwd=str(folder),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=self._log_handle,
+                stderr=subprocess.STDOUT,
             )
         except OSError as e:
             print(f"[CHATTERBOX] Could not start the server: {e}")
             return False
 
         return self._wait_until_ready()
+
+    def _port_in_use(self):
+        url = self.config.get("CHATTERBOX_URL").rstrip("/")
+        try:
+            requests.get(f"{url}/api/model-info", timeout=3)
+            return True
+        except requests.RequestException:
+            return False
+
+    def _report_log_tail(self, lines=6):
+        """Surfaces the reason the server gave up — CUDA OOM, a port clash, a bad venv."""
+        path = getattr(self, "_log_path", None)
+        if not path or not path.exists():
+            return
+        tail = [l.rstrip() for l in path.read_text(errors="replace").splitlines() if l.strip()]
+        interesting = [l for l in tail if any(
+            w in l for w in ("Error", "error", "CRITICAL", "Traceback", "OutOfMemory", "in use"))]
+        for line in (interesting or tail)[-lines:]:
+            print(f"[CHATTERBOX]   {line[:160]}")
 
     def _wait_until_ready(self):
         base = self.config.get("CHATTERBOX_URL").rstrip("/")
@@ -507,8 +537,9 @@ class ChatterboxLauncher:
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.process.poll() is not None:
-                print("[CHATTERBOX] The server exited while starting up.")
-                print(f"[CHATTERBOX] Run it manually to see why:  cd {self.config.get('CHATTERBOX_PATH')} && ./start.sh")
+                print("[CHATTERBOX] The server exited while starting up:")
+                self._report_log_tail()
+                print(f"[CHATTERBOX] Full log: {getattr(self, '_log_path', '(none)')}")
                 self.process = None
                 return False
             try:
@@ -538,6 +569,10 @@ class ChatterboxLauncher:
         except subprocess.TimeoutExpired:
             self.process.kill()
         self.process = None
+        handle = getattr(self, "_log_handle", None)
+        if handle:
+            handle.close()
+            self._log_handle = None
 
 
 # ==================== TEXT TO SPEECH ====================
