@@ -427,6 +427,20 @@ class AudioPlayer:
                 pass
 
 
+def _describe_free_vram():
+    """Best-effort VRAM reading, so a failed load says why rather than just timing out."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free,memory.total", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            free, total = (v.strip() for v in out.stdout.strip().splitlines()[0].split(","))
+            return f"Right now: {free} free of {total}."
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return "Could not read the GPU's free memory."
+
+
 # ==================== CHATTERBOX LAUNCHER ====================
 class ChatterboxLauncher:
     """
@@ -498,14 +512,20 @@ class ChatterboxLauncher:
                 self.process = None
                 return False
             try:
-                if requests.get(f"{base}/api/model-info", timeout=2).status_code == 200:
+                response = requests.get(f"{base}/api/model-info", timeout=2)
+                if response.status_code == 200 and response.json().get("loaded"):
                     print("[CHATTERBOX] Server is ready.")
                     return True
-            except requests.RequestException:
+            except (requests.RequestException, ValueError):
                 pass
             time.sleep(2)
 
-        print(f"[CHATTERBOX] Server did not come up within {timeout:.0f}s.")
+        print(f"[CHATTERBOX] The model did not finish loading within {timeout:.0f}s.")
+        print("[CHATTERBOX] The usual cause is VRAM: the model needs ~4.9GB, and Minecraft")
+        print("[CHATTERBOX] with a browser open can leave less than that free.")
+        print(f"[CHATTERBOX] {_describe_free_vram()}")
+        print("[CHATTERBOX] Start this bot BEFORE Minecraft so the model claims its memory")
+        print("[CHATTERBOX] first, or set TTS_BACKEND=edge, which uses no VRAM at all.")
         return False
 
     def stop(self):
@@ -579,21 +599,18 @@ class TTS:
             audio = self._chatterbox(text, urgent)
             if audio:
                 return audio
-            if self.backend == "chatterbox":
-                return None
-            print("[TTS] Chatterbox failed, falling back.")
+            print("[TTS] Chatterbox failed, falling back to Edge.")
 
         if self.backend in ("auto", "elevenlabs") and not self.elevenlabs_blocked:
             audio = self._elevenlabs(text)
             if audio:
                 return audio
-            if self.backend == "elevenlabs":
-                return None
-            print("[TTS] Falling back to Edge TTS.")
+            print("[TTS] ElevenLabs failed, falling back to Edge.")
 
-        if self.backend in ("auto", "edge", "chatterbox", "elevenlabs"):
-            return self._edge(text)
-        return None
+        # Edge is the last resort whatever the chosen backend: a single failed request should
+        # cost a different voice, not silence. Previously an explicit backend returned None
+        # here and the commentary just went quiet.
+        return self._edge(text)
 
     # ---- Chatterbox (local, GPU, emotional) ----
     def _chatterbox_available(self):
@@ -604,8 +621,12 @@ class TTS:
         base = self.config.get("CHATTERBOX_URL").rstrip("/")
         try:
             response = requests.get(f"{base}/api/model-info", timeout=3)
-            self._chatterbox_up = response.status_code == 200
-        except requests.RequestException:
+            # The server answers 200 as soon as it binds the port, while the model is still
+            # loading onto the GPU — synthesis then fails with 503. Only "loaded" means ready.
+            self._chatterbox_up = (
+                response.status_code == 200 and bool(response.json().get("loaded"))
+            )
+        except (requests.RequestException, ValueError):
             self._chatterbox_up = False
 
         if self._chatterbox_up:
@@ -1240,9 +1261,19 @@ class SetupWizard:
 
         choice = input("\nPick a voice: ").strip()
         if choice.isdigit() and 1 <= int(choice) <= len(voices):
+            picked = voices[int(choice) - 1]
             self.config.set("CHATTERBOX_MODE", "predefined")
-            self.config.set("CHATTERBOX_VOICE", voices[int(choice) - 1])
-            print(f"[OK] Voice set to {voices[int(choice) - 1]}.")
+            self.config.set("CHATTERBOX_VOICE", picked)
+            print(f"[OK] Voice set to {picked}.")
+
+            # Not every bundled voice actually synthesises — some return HTTP 500 every time.
+            # Better to find out here than mid-session.
+            print("Checking the voice works...")
+            if TTS(self.config).synthesize("Voice check.") is None:
+                print(f"[WARN] {picked} failed to synthesise. That voice looks broken on the")
+                print("       server; pick another one.")
+            else:
+                print("[OK] Voice works.")
 
     def _pick_chatterbox_clone(self, tts):
         if not tts._chatterbox_available():
@@ -1387,6 +1418,8 @@ class App:
     def __init__(self):
         self.config = Config()
         self.wizard = SetupWizard(self.config)
+        # A server we started ourselves, kept up for the whole run.
+        self.launcher = None
 
     def run(self):
         print("=" * 60)
@@ -1396,6 +1429,31 @@ class App:
         if not self.config.is_configured():
             self.wizard.run_initial_setup()
 
+        # Loading the model costs ~12s and ~5GB of VRAM, so it happens once per run rather
+        # than on every Start. It stays up until you quit.
+        self._ensure_server()
+        try:
+            self._menu_loop()
+        finally:
+            self._shutdown_server()
+
+    def _ensure_server(self):
+        if self.config.get("TTS_BACKEND").lower() not in ("auto", "chatterbox"):
+            return
+        launcher = ChatterboxLauncher(self.config)
+        if not launcher.enabled():
+            return
+        if TTS(self.config)._chatterbox_available():
+            return  # already running, someone else's to manage
+        if launcher.start():
+            self.launcher = launcher
+
+    def _shutdown_server(self):
+        if self.launcher:
+            self.launcher.stop()
+            self.launcher = None
+
+    def _menu_loop(self):
         while True:
             print("\n1. Start   2. Voice   3. API keys   4. Settings   5. Quit")
             choice = input("> ").strip()
@@ -1416,26 +1474,8 @@ class App:
         if not player.available() and platform.system() != "Windows":
             print("[WARN] No audio player found — install ffplay (ffmpeg), mpv or mpg123.")
 
-        launcher = self._maybe_start_chatterbox()
-        try:
-            self._run(player)
-        finally:
-            if launcher:
-                launcher.stop()
-
-    def _maybe_start_chatterbox(self):
-        """Returns the launcher only if we actually started a server, so we know to stop it."""
-        backend = self.config.get("TTS_BACKEND").lower()
-        if backend not in ("auto", "chatterbox"):
-            return None
-
-        launcher = ChatterboxLauncher(self.config)
-        if not launcher.enabled():
-            return None
-        if TTS(self.config)._chatterbox_available():
-            return None  # already running, not ours to manage
-
-        return launcher if launcher.start() else None
+        # The server's lifetime is the program's, not this run's — see _ensure_server.
+        self._run(player)
 
     def _run(self, player):
         ai = AIHandler(self.config, player)
