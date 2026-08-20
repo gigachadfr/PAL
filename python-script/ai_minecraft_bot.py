@@ -312,6 +312,312 @@ class Config:
         return all(self.get(k) for k in required) and bool(self.elevenlabs_keys["keys"])
 
 
+# ==================== FINDING MINECRAFT ====================
+class MinecraftFinder:
+    """
+    Works out where the mod is writing, so nobody has to paste a path.
+
+    Three signals, strongest first:
+
+      1. **A running Minecraft.** Its own game directory, read from the process itself, which
+         is the only signal that picks the right one when you keep several instances.
+      2. **A folder the mod has already written to.** `logs/player_actions/session.log` existing
+         is proof, and its timestamp says which instance you played last.
+      3. **A folder that looks like a game directory** — it has `saves`, `mods` or `options.txt`
+         — whether or not the mod has ever run there.
+
+    The scan is bounded by depth and by a time budget, because it runs at startup and a home
+    directory can be enormous. Launcher layouts are not guessed from a fixed table either: the
+    default CurseForge folder is `~/curseforge`, and the machine this was written on had it in
+    `~/Documents`.
+    """
+
+    MAX_DEPTH = 6
+    TIME_BUDGET_S = 6.0
+    SHOW_MAX = 6
+
+    # What a Minecraft game directory has in it that other folders do not.
+    GAME_DIR_MARKERS = ("saves", "mods", "versions", "options.txt")
+
+    # Big, deep and never the answer. `assets` and `libraries` alone are tens of thousands of
+    # files in every installation.
+    SKIP = {
+        "assets", "libraries", "saves", "resourcepacks", "shaderpacks", "texturepacks",
+        "screenshots", "crash-reports", "node_modules", "__pycache__", "venv", ".git",
+        ".cache", ".fabric", ".mixin.out", "steamapps", "Steam", ".steam", "Trash",
+        # A backup is a copy of an instance, never the one being written to now.
+        "Backups", "backups",
+    }
+
+    # Strongest wins when the same folder is reached twice: the walk meets an instance folder
+    # before it meets the log directory inside it, and "used before" is the better label.
+    SOURCE_RANK = {"game folder": 0, "used before": 1, "running now": 2}
+
+    # Folder names worth treating as a launcher root wherever they turn up.
+    HOME_HINTS = ("minecraft", "curseforge", "prism", "multimc", "atlauncher", "modrinth",
+                  "technic", "gdlauncher", "ftb")
+
+    # Places a launcher root is likely to sit, checked one level down.
+    HOME_BASES = ("", "Documents", "Games", "Apps", ".local/share", ".var/app")
+
+    @classmethod
+    def detect(cls, budget=None):
+        """Ranked candidates, best first. Never raises; returns [] when it finds nothing."""
+        found = {}
+        for game_dir, source in cls._running():
+            cls._remember(found, game_dir, source, running=True)
+
+        deadline = time.time() + (budget if budget is not None else cls.TIME_BUDGET_S)
+        for root in cls._roots():
+            if time.time() > deadline:
+                break
+            cls._scan(root, found, deadline)
+
+        entries = list(found.values())
+        # Running first, then whichever was written to most recently, then the rest.
+        entries.sort(key=lambda e: (not e["running"], -(e["last_write"] or 0), e["path"]))
+        return entries
+
+    # ---- signal 1: a running game -----------------------------------------
+
+    @classmethod
+    def _running(cls):
+        try:
+            if Path("/proc").is_dir():
+                return cls._running_from_proc()
+            if platform.system() != "Windows":
+                return cls._running_from_ps()
+        except Exception as e:  # never let process inspection break startup
+            print(f"[FIND] Could not inspect running processes: {e}")
+        return []
+
+    @staticmethod
+    def _is_java(*names):
+        return any(Path(name).name.lower().startswith(("java", "javaw")) for name in names if name)
+
+    @classmethod
+    def _looks_like_minecraft(cls, executable, args):
+        """
+        Strict on two counts, both of which caught something real.
+
+        The process has to be a JVM. Without that, any process whose command line merely
+        *mentions* these flags matches — a shell running a launch script, a grep, an editor.
+        The first thing this rule excluded was this project's own test harness.
+
+        And the marker has to be a Minecraft marker rather than the word "minecraft", which
+        appears in this bot's own `python ai_minecraft_bot.py` and would make it find itself.
+        """
+        if not cls._is_java(executable, args[0] if args else ""):
+            return False
+        joined = " ".join(args)
+        if "--assetIndex" in args or "--assetsDir" in args:
+            return True
+        return ("net.minecraft.client.main.Main" in joined
+                or "net.fabricmc.loader.impl.launch.knot.KnotClient" in joined
+                or "cpw.mods.bootstraplauncher" in joined)
+
+    @classmethod
+    def _running_from_proc(cls):
+        found = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                raw = (entry / "cmdline").read_bytes()
+            except OSError:
+                continue  # gone, or another user's
+            args = [part for part in raw.decode("utf-8", "replace").split("\0") if part]
+            if not args:
+                continue
+            try:
+                executable = os.readlink(entry / "exe")
+            except OSError:
+                executable = ""  # another user's process, or already gone
+            if not cls._looks_like_minecraft(executable, args):
+                continue
+
+            game_dir = None
+            if "--gameDir" in args:
+                index = args.index("--gameDir")
+                if index + 1 < len(args):
+                    candidate = Path(args[index + 1])
+                    if candidate.is_absolute() and candidate.is_dir():
+                        game_dir = candidate
+            if game_dir is None:
+                # The working directory is the game directory under every launcher tried, and
+                # it is right even when --gameDir was passed as a relative path.
+                try:
+                    game_dir = Path(os.readlink(entry / "cwd"))
+                except OSError:
+                    continue
+            found.append((game_dir, "running now"))
+        return found
+
+    @classmethod
+    def _running_from_ps(cls):
+        """
+        macOS and the BSDs have no /proc. Splitting `ps` output on spaces cannot survive a path
+        with a space in it, so this only trusts --gameDir when the result exists on disk.
+        """
+        try:
+            output = subprocess.run(["ps", "-axo", "args="], capture_output=True, text=True,
+                                    timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+
+        found = []
+        for line in output.splitlines():
+            args = line.split()
+            if not args or not cls._looks_like_minecraft(args[0], args):
+                continue
+            if "--gameDir" not in args:
+                continue
+            index = args.index("--gameDir")
+            if index + 1 >= len(args):
+                continue
+            candidate = Path(args[index + 1])
+            if candidate.is_dir():
+                found.append((candidate, "running now"))
+        return found
+
+    # ---- signals 2 and 3: what is on disk ----------------------------------
+
+    @classmethod
+    def _roots(cls):
+        home = Path.home()
+        roots = [home / ".minecraft", home / "curseforge", home / "Documents" / "curseforge"]
+
+        if platform.system() == "Darwin":
+            roots.append(home / "Library" / "Application Support" / "minecraft")
+        elif platform.system() == "Windows":
+            appdata = os.getenv("APPDATA")
+            if appdata:
+                roots.append(Path(appdata) / ".minecraft")
+
+        # Anything launcher-shaped one level under the usual places, which is how a CurseForge
+        # folder moved to ~/Documents gets found without walking the whole home directory.
+        for base in cls.HOME_BASES:
+            directory = home / base if base else home
+            try:
+                children = list(directory.iterdir())
+            except OSError:
+                continue
+            for child in children:
+                if not child.is_dir():
+                    continue
+                name = child.name.lower().lstrip(".")
+                if any(hint in name for hint in cls.HOME_HINTS):
+                    roots.append(child)
+
+        seen, unique = set(), []
+        for root in roots:
+            resolved = str(root)
+            if resolved not in seen and root.is_dir():
+                seen.add(resolved)
+                unique.append(root)
+        return unique
+
+    @classmethod
+    def _scan(cls, root, found, deadline):
+        base_depth = len(root.parts)
+        for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: None):
+            if time.time() > deadline:
+                return
+            here = Path(dirpath)
+
+            if here.name == "player_actions" and here.parent.name == "logs":
+                cls._remember(found, here.parent.parent, "used before")
+                dirnames[:] = []
+                continue
+
+            if any(marker in dirnames or marker in filenames
+                   for marker in cls.GAME_DIR_MARKERS):
+                cls._remember(found, here, "game folder")
+                # Nothing below a game directory matters except its own logs.
+                dirnames[:] = [d for d in dirnames if d == "logs"]
+                continue
+
+            if len(here.parts) - base_depth >= cls.MAX_DEPTH:
+                dirnames[:] = []
+            else:
+                dirnames[:] = [d for d in dirnames if d not in cls.SKIP]
+
+    @staticmethod
+    def _remember(found, game_dir, source, running=False):
+        target = Path(game_dir) / "logs" / "player_actions"
+        key = str(target)
+        entry = found.get(key) or {
+            "path": key,
+            "game_dir": str(game_dir),
+            "name": Path(game_dir).name,
+            "source": source,
+            "running": False,
+            "exists": target.is_dir(),
+            "last_write": None,
+        }
+        log = target / LOG_FILE_NAME
+        try:
+            if log.is_file():
+                entry["last_write"] = log.stat().st_mtime
+                entry["exists"] = True
+        except OSError:
+            pass
+        if running:
+            entry["running"] = True
+        if (MinecraftFinder.SOURCE_RANK.get(source, 0)
+                >= MinecraftFinder.SOURCE_RANK.get(entry["source"], 0)):
+            entry["source"] = source
+        found[key] = entry
+
+    # ---- presentation -------------------------------------------------------
+
+    @staticmethod
+    def describe(entry):
+        bits = [entry["source"]]
+        if entry["last_write"]:
+            when = datetime.fromtimestamp(entry["last_write"]).strftime("%Y-%m-%d %H:%M")
+            bits.append(f"last written {when}")
+        elif not entry["exists"]:
+            bits.append("the mod has not run here yet")
+        return ", ".join(bits)
+
+    @classmethod
+    def choose(cls, config):
+        """Offers what it found and saves the pick. Returns the chosen path, or ''."""
+        print("\n[FIND] Looking for Minecraft…")
+        candidates = cls.detect()
+        if not candidates:
+            print("[FIND] Nothing found.")
+            typed = input("Log directory (…/logs/player_actions): ").strip()
+            if typed:
+                config.set("LOG_DIRECTORY", typed)
+            return typed
+
+        shown = candidates[:cls.SHOW_MAX]
+        print(f"\nFound {len(candidates)} possible folder(s), likeliest first:")
+        for i, entry in enumerate(shown, 1):
+            flag = " <-- running now" if entry["running"] else ""
+            print(f"  {i}. {entry['name']}{flag}")
+            print(f"     {entry['path']}")
+            print(f"     {cls.describe(entry)}")
+        if len(candidates) > len(shown):
+            print(f"  … and {len(candidates) - len(shown)} more the mod has never run in.")
+        print("  0. Type a path myself")
+
+        choice = input("\nUse which? [1] ").strip() or "1"
+        if choice == "0":
+            typed = input("Log directory: ").strip()
+            if typed:
+                config.set("LOG_DIRECTORY", typed)
+            return typed
+        if choice.isdigit() and 1 <= int(choice) <= len(shown):
+            picked = candidates[int(choice) - 1]["path"]
+            config.set("LOG_DIRECTORY", picked)
+            print(f"[OK] Watching {picked}")
+            return picked
+        return ""
+
+
 # ==================== LOG TAILING ====================
 class LogTailer:
     """
@@ -601,6 +907,12 @@ class PlayerState:
     """
 
     def __init__(self, directory):
+        self.path = None
+        self._warned = False
+        self.retarget(directory)
+
+    def retarget(self, directory):
+        """Points at another game folder, for when the log directory is changed live."""
         self.path = Path(directory) / STATE_FILE_NAME if directory else None
         self._warned = False
 
@@ -1733,9 +2045,7 @@ class SetupWizard:
             self.config.set("VOICE_ID", input("ElevenLabs voice ID: ").strip())
 
         if not self.config.get("LOG_DIRECTORY"):
-            print("\nThis is the mod's log folder, usually:")
-            print("  <your minecraft folder>/logs/player_actions")
-            self.config.set("LOG_DIRECTORY", input("Log directory: ").strip())
+            MinecraftFinder.choose(self.config)
 
         print("\n[OK] Setup complete.")
 
@@ -2146,6 +2456,7 @@ class App:
 
         if not self.config.is_configured():
             self.wizard.run_initial_setup()
+        self._check_log_directory()
 
         self._start_dashboard()
 
@@ -2159,11 +2470,26 @@ class App:
             if self.dashboard:
                 self.dashboard.stop()
 
+    def _check_log_directory(self):
+        """
+        A folder that was right last month is wrong once you make a new instance, and the
+        symptom — the bot sitting silently on a path that no longer exists — looks identical
+        to Minecraft simply not running.
+        """
+        current = self.config.get("LOG_DIRECTORY")
+        if current and Path(current).is_dir():
+            return
+        if current:
+            print(f"[FIND] {current} does not exist any more.")
+        MinecraftFinder.choose(self.config)
+        self.state.retarget(self.config.get("LOG_DIRECTORY"))
+
     def _start_dashboard(self):
         if not Dashboard or self.config.get("DASHBOARD").lower() != "true":
             return
         dashboard = Dashboard(
-            self.config, self.telemetry, self.state, options=self.options,
+            self.config, self.telemetry, self.state,
+            options=self.options, finder=MinecraftFinder,
             host=self.config.get("DASHBOARD_HOST"),
             port=self.config.get_int("DASHBOARD_PORT"),
         )

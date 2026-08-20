@@ -551,6 +551,9 @@ function renderSettings(groups) {
 
   $("settings").querySelectorAll("[data-options]").forEach(select => loadOptions(select));
 
+  const detect = $("settings").querySelector("[data-detect]");
+  if (detect) detect.addEventListener("click", () => runDetect(detect));
+
   $("settings").querySelectorAll("[data-addbtn]").forEach(button =>
     button.addEventListener("click", async () => {
       const field = button.dataset.addbtn;
@@ -577,6 +580,42 @@ function renderSettings(groups) {
     }
   });
   settingsDrawn = true;
+}
+
+async function runDetect(button) {
+  const box = $("detected");
+  button.disabled = true;
+  button.textContent = "Looking…";
+  box.innerHTML = '<p class="help">Checking for a running Minecraft and scanning your launchers…</p>';
+  try {
+    const data = await getJSON("/api/detect");
+    if (!data.candidates.length) {
+      box.innerHTML = '<p class="help">Nothing found. Type the path instead.</p>';
+      return;
+    }
+    box.innerHTML = data.candidates.slice(0, 8).map((c, i) => `
+      <div class="row" style="cursor:pointer" data-use="${i}">
+        <span class="name">${esc(c.name)}
+          ${c.running ? '<span class="tag info">running now</span>' : ""}</span>
+        <span class="value">${esc(c.description)}</span>
+      </div>`).join("");
+    box.querySelectorAll("[data-use]").forEach(row =>
+      row.addEventListener("click", async () => {
+        const chosen = data.candidates[Number(row.dataset.use)];
+        const result = await postJSON("/api/detect", { path: chosen.path });
+        toast(result.message, !result.ok);
+        if (result.ok) {
+          const input = $("settings").querySelector('[data-key="LOG_DIRECTORY"]');
+          if (input) input.value = chosen.path;
+          box.innerHTML = "";
+        }
+      }));
+  } catch (e) {
+    box.innerHTML = '<p class="help">The scan failed.</p>';
+  } finally {
+    button.disabled = false;
+    button.textContent = "Detect";
+  }
 }
 
 async function loadOptions(select) {
@@ -619,6 +658,12 @@ function fieldHtml(field) {
     control = `<div class="withval">
       <input type="range" id="${id}" data-key="${field.key}" min="${field.min}" max="${field.max}"
              step="${field.step}" value="${esc(field.value)}"><output>${esc(field.value)}</output></div>`;
+  } else if (field.type === "path") {
+    control = `<div class="addrow">
+        <input id="${id}" data-key="${field.key}" value="${esc(field.value)}" style="flex:1">
+        <button class="small" data-detect="1">Detect</button>
+      </div>
+      <div id="detected"></div>`;
   } else if (field.type === "options") {
     // Populated from /api/options once the form is on the page: the lists come from the
     // backends themselves and one of them is a network call away.

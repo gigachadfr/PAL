@@ -86,8 +86,8 @@ SETTINGS_SCHEMA = [
     {
         "group": "Sources and keys",
         "fields": [
-            {"key": "LOG_DIRECTORY", "label": "Minecraft log folder", "type": "text",
-             "help": "The logs/player_actions folder inside your Minecraft directory."},
+            {"key": "LOG_DIRECTORY", "label": "Minecraft log folder", "type": "path",
+             "help": "Detect finds it from a running Minecraft, or from the instances on disk."},
             {"key": "CHECK_INTERVAL", "label": "Log poll", "type": "number", "unit": "s"},
             {"key": "GEMINI_API_KEY", "label": "Gemini API key", "type": "secret",
              "help": "Stored in .env. Shown masked; type a new one to replace it."},
@@ -362,11 +362,13 @@ class KeyQuotas:
 class Dashboard:
     """The HTTP server and everything it needs to answer with."""
 
-    def __init__(self, config, telemetry, state, options=None, host="127.0.0.1", port=8765):
+    def __init__(self, config, telemetry, state, options=None, finder=None,
+                 host="127.0.0.1", port=8765):
         self.config = config
         self.telemetry = telemetry
         self.state = state
         self.options = options
+        self.finder = finder
         self.host = host
         self.port = port
         self.quotas = KeyQuotas(config)
@@ -441,6 +443,26 @@ class Dashboard:
         self.config.set(key, value)
         return True, f"{key} updated."
 
+    def detect_log_directory(self):
+        if not self.finder:
+            return {"candidates": []}
+        found = self.finder.detect()
+        return {"candidates": [dict(entry, description=self.finder.describe(entry))
+                               for entry in found]}
+
+    def use_log_directory(self, path):
+        path = (path or "").strip()
+        if not path:
+            return False, "No folder given."
+        self.config.set("LOG_DIRECTORY", path)
+        if self.state:
+            self.state.retarget(path)
+        if not Path(path).is_dir():
+            # Saved anyway: the mod creates the folder the first time you join a world, so a
+            # path that does not exist yet is a normal thing to configure ahead of time.
+            return True, "Saved. That folder does not exist yet — the mod will create it."
+        return True, "Saved. The event log is picked up on the next Start."
+
     def voice_options(self, field):
         if not self.options:
             return {"choices": [], "value": "", "note": ""}
@@ -510,6 +532,8 @@ class Dashboard:
                     self._send(200, dashboard.quotas.get(force="force=1" in self.path))
                 elif route == "/api/settings":
                     self._send(200, dashboard.settings())
+                elif route == "/api/detect":
+                    self._send(200, dashboard.detect_log_directory())
                 elif route == "/api/options":
                     field = ""
                     if "field=" in self.path:
@@ -535,6 +559,9 @@ class Dashboard:
                     self._send(200 if ok else 400, {"ok": ok, "message": message})
                 elif route == "/api/keys":
                     ok, message = dashboard.update_keys(payload.get("action", ""), payload)
+                    self._send(200 if ok else 400, {"ok": ok, "message": message})
+                elif route == "/api/detect":
+                    ok, message = dashboard.use_log_directory(payload.get("path", ""))
                     self._send(200 if ok else 400, {"ok": ok, "message": message})
                 elif route == "/api/options":
                     ok, message = dashboard.add_voice_option(

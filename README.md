@@ -131,7 +131,8 @@ On first run it walks you through setup:
 1. **Gemini API key**
 2. **ElevenLabs API key(s)** — optional, you can add several and it rotates when one hits its quota
 3. **Voice ID** — see the note below
-4. **Log directory** — your `logs/player_actions` folder
+4. **Log directory** — found for you: the bot reads it from a running Minecraft, or from the
+   instances on your disk, and offers the one you played last. No path to paste.
 
 **About the voice:** the free ElevenLabs plan no longer allows Voice Library voices over the API
 (HTTP 402), and its 10,000 characters/month is about 10 minutes of speech. Three backends are

@@ -156,6 +156,46 @@ earlier session instead of meeting you for the first time again.
 
 Saves are plain `{role, text}` JSON: readable, editable, and independent of the SDK.
 
+## Finding Minecraft
+
+The bot works out where the mod is writing instead of asking you to paste a path. It does this
+on first run, whenever the configured folder has gone missing, and on demand from the
+dashboard's **Detect** button next to the log folder setting.
+
+Three signals, strongest first:
+
+1. **A running Minecraft.** Read from the process itself — its `--gameDir`, or its working
+   directory when that argument is relative or absent. This is the only signal that picks the
+   right one when you keep several instances open.
+2. **A folder the mod has already written to.** `logs/player_actions/session.log` existing is
+   proof, and its timestamp says which instance you played last, so that one is offered first.
+3. **A folder that looks like a game directory** — one with `saves`, `mods` or `options.txt`,
+   whether or not the mod has ever run there. Useful for a brand new instance.
+
+```
+Found 10 possible folder(s), likeliest first:
+  1. meggggaa
+     /home/you/Documents/curseforge/minecraft/Instances/meggggaa/logs/player_actions
+     used before, last written 2026-08-20 18:34
+  2. aiiiiiiiiiiii
+     …
+```
+
+Launcher layouts are not read off a fixed table. `~/.minecraft`, CurseForge, Prism, MultiMC,
+ATLauncher, Modrinth and the Flatpak paths are all checked, but the machine this was written on
+had its CurseForge folder in `~/Documents` rather than the default `~/curseforge`, so anything
+launcher-shaped one level under the usual places is treated as a root too. The walk is bounded
+by depth and by a time budget, and prunes `assets`, `libraries` and `saves` — the folders that
+hold tens of thousands of files and never hold the answer. It took **0.4 s** across ten
+instances on the machine it was built on.
+
+**Process matching is deliberately strict.** It requires a JVM *and* a Minecraft marker
+(`--assetIndex`, `net.minecraft.client.main.Main`, Fabric's `KnotClient`, Forge's bootstrap
+launcher). Matching on the word "minecraft" would make the bot find its own
+`python ai_minecraft_bot.py`, and matching on the flags alone matches any shell running a
+launch script — during development that included this project's own test harness. On Windows
+there is no process inspection; it falls back to the folders on disk.
+
 ## Dashboard
 
 A local web dashboard starts with the bot and prints its address:
@@ -319,7 +359,8 @@ Minecraft restarts and truncates it — it resynchronises instead of going silen
 ## Troubleshooting
 
 **No log file found** — check the directory points at `logs/player_actions` inside your Minecraft
-folder, and that you have joined a world at least once with the mod installed.
+folder, and that you have joined a world at least once with the mod installed. The bot offers to
+find it for you (see below) rather than making you go looking.
 
 **"No player_state.json yet"** — the same directory, from PAL 2.2 onwards. Until it appears the
 bot still works, but it comments without knowing your health and the three lookups return
