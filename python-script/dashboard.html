@@ -1,0 +1,636 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minecraft AI Commentator</title>
+<style>
+:root {
+  --bg: #0b0e14; --card: #141922; --card-2: #1b2130; --line: #232b3a;
+  --text: #e6edf7; --dim: #8b98ad; --faint: #5b6779;
+  --info: #58a6ff; --notable: #e3a008; --critical: #f85149;
+  --ok: #3fb950; --warn: #d29922; --accent: #7c6cf7;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+a { color: var(--info); }
+h1 { font-size: 15px; margin: 0; letter-spacing: .2px; }
+h2 { font-size: 12px; margin: 0 0 14px; text-transform: uppercase;
+     letter-spacing: .09em; color: var(--dim); font-weight: 600; }
+h3 { font-size: 12px; margin: 18px 0 8px; color: var(--dim); font-weight: 600; }
+
+/* ---- top bar ---- */
+header {
+  position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 18px;
+  padding: 12px 22px; background: rgba(11,14,20,.92); backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line); flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+.cube { width: 22px; height: 22px; border-radius: 5px; background: linear-gradient(135deg, var(--accent), var(--info)); }
+.pill {
+  display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px;
+  background: var(--card-2); border: 1px solid var(--line); font-size: 12px; color: var(--dim);
+  white-space: nowrap;
+}
+.pill b { color: var(--text); font-weight: 600; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+.dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.dot.off { background: var(--critical); }
+
+/* ---- layout ---- */
+main { padding: 22px; display: grid; gap: 16px;
+       grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); align-items: start; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+.card.wide { grid-column: span 2; }
+@media (max-width: 760px) { .card.wide { grid-column: span 1; } main { padding: 14px; } }
+
+/* ---- bits ---- */
+.metric { display: flex; align-items: baseline; gap: 8px; }
+.metric .big { font-size: 26px; font-weight: 650; letter-spacing: -.5px; }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 14px; }
+.metrics .label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.bar { height: 7px; border-radius: 999px; background: var(--card-2); overflow: hidden; }
+.bar > span { display: block; height: 100%; border-radius: 999px; transition: width .4s ease; }
+.row { display: flex; justify-content: space-between; gap: 12px; align-items: center;
+       padding: 7px 0; border-bottom: 1px solid var(--line); }
+.row:last-child { border-bottom: 0; }
+.row .name { color: var(--text); }
+.row .value { color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.muted { color: var(--dim); }
+.empty { color: var(--faint); font-style: italic; padding: 8px 0; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+       background: var(--card-2); color: var(--dim); border: 1px solid var(--line); }
+.tag.info { color: var(--info); border-color: rgba(88,166,255,.3); }
+.tag.notable { color: var(--notable); border-color: rgba(227,160,8,.3); }
+.tag.critical { color: var(--critical); border-color: rgba(248,81,73,.35); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ---- feed ---- */
+.feed { max-height: 340px; overflow-y: auto; margin: -4px -6px; padding: 0 6px; }
+.feed::-webkit-scrollbar { width: 8px; }
+.feed::-webkit-scrollbar-thumb { background: var(--card-2); border-radius: 999px; }
+.line { display: grid; grid-template-columns: 62px 74px 1fr; gap: 10px; padding: 6px 0;
+        border-bottom: 1px solid var(--line); font-size: 13px; }
+.line .clock { color: var(--faint); font-variant-numeric: tabular-nums; }
+.line.critical .msg { color: var(--critical); }
+.line.notable .msg { color: var(--notable); }
+
+/* ---- replies ---- */
+.reply { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.reply:last-child { border-bottom: 0; }
+.reply .said { margin: 4px 0 0; }
+.reply .meta { display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--faint); }
+
+/* ---- keys ---- */
+.key { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.key:last-child { border-bottom: 0; }
+.key .top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.key code { font-size: 12px; color: var(--text); background: var(--card-2);
+            padding: 2px 7px; border-radius: 5px; }
+.key .foot { display: flex; justify-content: space-between; font-size: 11px;
+             color: var(--faint); margin-top: 6px; }
+
+/* ---- forms ---- */
+label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 5px; }
+input, select, textarea {
+  width: 100%; padding: 8px 10px; border-radius: 8px; background: var(--bg);
+  border: 1px solid var(--line); color: var(--text); font: inherit; font-size: 13px;
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+textarea { min-height: 88px; resize: vertical; }
+input[type=range] { padding: 0; height: 26px; accent-color: var(--accent); }
+.field { margin-bottom: 15px; }
+.field .help { font-size: 11px; color: var(--faint); margin-top: 4px; }
+.field .withval { display: flex; align-items: center; gap: 10px; }
+.field .withval output { font-variant-numeric: tabular-nums; color: var(--text);
+                         min-width: 38px; text-align: right; }
+button {
+  padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--card-2); color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger:hover { border-color: var(--critical); color: var(--critical); }
+button.small { padding: 3px 9px; font-size: 12px; }
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.toast {
+  position: fixed; right: 20px; bottom: 20px; padding: 11px 16px; border-radius: 9px;
+  background: var(--card-2); border: 1px solid var(--line); font-size: 13px;
+  opacity: 0; transform: translateY(8px); transition: all .25s; pointer-events: none; z-index: 50;
+}
+.toast.show { opacity: 1; transform: none; }
+.toast.bad { border-color: var(--critical); color: var(--critical); }
+svg { display: block; width: 100%; overflow: visible; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--dim);
+          margin-top: 10px; }
+.legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-right: 5px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand"><div class="cube"></div><h1>Minecraft AI Commentator</h1></div>
+  <span class="pill"><span class="dot" id="dot-mod"></span>Minecraft <b id="mod-world">—</b></span>
+  <span class="pill"><span class="dot" id="dot-bot"></span>Watching <b id="bot-uptime">—</b></span>
+  <span class="pill">Voice <b id="hd-backend">—</b></span>
+  <span class="pill">Model <b id="hd-model">—</b></span>
+  <span class="pill" id="hd-clock">—</span>
+</header>
+
+<main>
+
+  <section class="card">
+    <h2>The player right now</h2>
+    <div id="vitals"><p class="empty">Waiting for Minecraft…</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Session</h2>
+    <div class="metrics">
+      <div><div class="label">Replies</div><div class="metric"><span class="big" id="m-calls">0</span></div></div>
+      <div><div class="label">Avg latency</div><div class="metric"><span class="big" id="m-latency">0</span><span class="muted">s</span></div></div>
+      <div><div class="label">Events</div><div class="metric"><span class="big" id="m-events">0</span></div></div>
+      <div><div class="label">Spoken</div><div class="metric"><span class="big" id="m-chars">0</span><span class="muted">ch</span></div></div>
+    </div>
+    <h3>Events by level</h3>
+    <div id="levels"></div>
+    <h3>Busiest event types</h3>
+    <div id="types"></div>
+    <div id="errors"></div>
+  </section>
+
+  <section class="card wide">
+    <h2>ElevenLabs keys — consumption and reset</h2>
+    <div id="keys"><p class="empty">Loading quotas…</p></div>
+    <div class="actions" style="margin-top:14px">
+      <input id="new-key" placeholder="Paste another API key" style="flex:1;min-width:190px">
+      <button id="add-key">Add key</button>
+      <button id="refresh-keys">Refresh quotas</button>
+    </div>
+  </section>
+
+  <section class="card wide">
+    <h2>Characters spoken over this session</h2>
+    <div id="speech-chart"></div>
+    <div class="legend" id="speech-legend"></div>
+  </section>
+
+  <section class="card">
+    <h2>Deaths</h2>
+    <div id="deaths"><p class="empty">No statistics yet.</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Progress</h2>
+    <div id="progress"><p class="empty">No statistics yet.</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Inventory</h2>
+    <div id="inventory"><p class="empty">Waiting for Minecraft…</p></div>
+  </section>
+
+  <section class="card">
+    <h2>Equipment</h2>
+    <div id="equipment"><p class="empty">Waiting for Minecraft…</p></div>
+  </section>
+
+  <section class="card wide">
+    <h2>Live events</h2>
+    <div class="feed" id="feed"><p class="empty">Nothing yet.</p></div>
+  </section>
+
+  <section class="card wide">
+    <h2>What it said</h2>
+    <div id="replies"><p class="empty">Nothing said yet.</p></div>
+  </section>
+
+  <section class="card wide">
+    <h2>Settings</h2>
+    <div id="settings"><p class="empty">Loading…</p></div>
+  </section>
+
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => (n === null || n === undefined) ? "—" : Number(n).toLocaleString("en-US");
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const LEVEL_COLOUR = { INFO: "var(--info)", NOTABLE: "var(--notable)", CRITICAL: "var(--critical)" };
+const PALETTE = ["#7c6cf7", "#58a6ff", "#3fb950", "#e3a008", "#f85149", "#39c5cf"];
+
+function toast(message, bad) {
+  const el = $("toast");
+  el.textContent = message;
+  el.className = "toast show" + (bad ? " bad" : "");
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => el.className = "toast", 2600);
+}
+
+async function getJSON(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+async function postJSON(url, body) {
+  const response = await fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  return response.json();
+}
+
+function duration(seconds) {
+  if (seconds === null || seconds === undefined) return "—";
+  const h = Math.floor(seconds / 3600), m = Math.floor(seconds % 3600 / 60);
+  if (h) return `${h}h ${m}m`;
+  return m ? `${m}m ${Math.floor(seconds % 60)}s` : `${Math.floor(seconds)}s`;
+}
+
+/* ---------- charts, hand drawn: no CDN is reachable from a local page ---------- */
+
+function bars(items, options = {}) {
+  if (!items.length) return '<p class="empty">Nothing to show.</p>';
+  const max = Math.max(...items.map(i => i.value), 1);
+  return items.map(item => {
+    const colour = item.colour || options.colour || "var(--accent)";
+    return `<div style="margin-bottom:9px">
+      <div class="row" style="border:0;padding:0 0 4px">
+        <span class="name">${esc(item.label)}</span>
+        <span class="value">${esc(item.text ?? fmt(item.value))}</span>
+      </div>
+      <div class="bar"><span style="width:${(item.value / max * 100).toFixed(1)}%;background:${colour}"></span></div>
+    </div>`;
+  }).join("");
+}
+
+/* Cumulative area chart. Series: [{ name, colour, points: [[x, y], …] }] */
+function areaChart(series, width = 700, height = 170) {
+  const points = series.flatMap(s => s.points);
+  if (points.length < 2) return '<p class="empty">Not enough spoken lines yet to draw a curve.</p>';
+
+  const maxX = Math.max(...points.map(p => p[0])) || 1;
+  const maxY = Math.max(...points.map(p => p[1])) || 1;
+  const pad = { l: 46, r: 8, t: 10, b: 22 };
+  const sx = x => pad.l + x / maxX * (width - pad.l - pad.r);
+  const sy = y => height - pad.b - y / maxY * (height - pad.t - pad.b);
+
+  let svg = `<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" style="height:${height}px">`;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad.t + i * (height - pad.t - pad.b) / 4;
+    const value = Math.round(maxY * (1 - i / 4));
+    svg += `<line x1="${pad.l}" y1="${y}" x2="${width - pad.r}" y2="${y}" stroke="var(--line)"/>`;
+    svg += `<text x="${pad.l - 8}" y="${y + 4}" fill="var(--faint)" font-size="10" text-anchor="end">${fmt(value)}</text>`;
+  }
+  for (const s of series) {
+    const line = s.points.map(p => `${sx(p[0])},${sy(p[1])}`).join(" ");
+    const last = s.points[s.points.length - 1];
+    svg += `<polygon points="${sx(s.points[0][0])},${sy(0)} ${line} ${sx(last[0])},${sy(0)}"
+             fill="${s.colour}" opacity=".13"/>`;
+    svg += `<polyline points="${line}" fill="none" stroke="${s.colour}" stroke-width="2"
+             stroke-linejoin="round" stroke-linecap="round"/>`;
+  }
+  svg += `<text x="${pad.l}" y="${height - 6}" fill="var(--faint)" font-size="10">start</text>`;
+  svg += `<text x="${width - pad.r}" y="${height - 6}" fill="var(--faint)" font-size="10" text-anchor="end">now</text>`;
+  return svg + "</svg>";
+}
+
+/* ---------- renderers ---------- */
+
+function renderVitals(player) {
+  if (!player) return '<p class="empty">Minecraft is not running, or the mod is not installed.</p>';
+  const v = player.vitals || {}, loc = player.location || {};
+  const gauge = (label, value, max, colour) => `
+    <div style="margin-bottom:11px">
+      <div class="row" style="border:0;padding:0 0 4px">
+        <span class="name">${label}</span><span class="value">${value} / ${max}</span>
+      </div>
+      <div class="bar"><span style="width:${Math.min(100, value / max * 100)}%;background:${colour}"></span></div>
+    </div>`;
+
+  const health = v.health ?? 0, maxHealth = v.max_health || 20;
+  const ratio = health / maxHealth;
+  const healthColour = ratio > .6 ? "var(--ok)" : ratio > .3 ? "var(--warn)" : "var(--critical)";
+
+  let html = gauge("Health", health, maxHealth, healthColour);
+  html += gauge("Hunger", v.hunger ?? 0, 20, "#c9743a");
+  html += gauge("Armour", v.armor ?? 0, 20, "#7d8590");
+
+  html += `<div class="row"><span class="name">Doing</span><span class="value">${esc(v.doing || "—")}</span></div>`;
+  html += `<div class="row"><span class="name">XP level</span><span class="value">${fmt(v.xp_level)}</span></div>`;
+  html += `<div class="row"><span class="name">Mode</span><span class="value">${esc(v.gamemode || "—")} · ${esc(v.difficulty || "—")}</span></div>`;
+  html += `<div class="row"><span class="name">Where</span><span class="value">${esc(loc.biome || "—")}, Y=${loc.y ?? "—"}</span></div>`;
+  html += `<div class="row"><span class="name">Dimension</span><span class="value">${esc(loc.dimension || "—")} · ${esc(loc.time_of_day || "")}</span></div>`;
+
+  const effects = player.effects || [];
+  html += '<h3>Status effects</h3>';
+  html += effects.length
+    ? `<div class="chips">${effects.map(e => `<span class="tag">${esc(e.name)} ${e.level}${
+        e.seconds_left === -1 ? " ∞" : " · " + e.seconds_left + "s"}</span>`).join("")}</div>`
+    : '<p class="empty">None active.</p>';
+  return html;
+}
+
+function renderKeys(keys, loading) {
+  if (loading) return '<p class="empty">Asking ElevenLabs where each key stands…</p>';
+  if (!keys.length) return '<p class="empty">No ElevenLabs keys yet. Add one below, or stay on Chatterbox and Edge.</p>';
+  return keys.map(key => {
+    let body;
+    if (key.status === "ok") {
+      const percent = key.percent;
+      const colour = percent > 90 ? "var(--critical)" : percent > 70 ? "var(--warn)" : "var(--ok)";
+      const resets = key.resets_in_hours === null || key.resets_in_hours === undefined
+        ? "no reset date"
+        : key.resets_in_hours > 48
+          ? `resets in ${Math.round(key.resets_in_hours / 24)} days`
+          : `resets in ${key.resets_in_hours} h`;
+      body = `
+        <div class="bar"><span style="width:${Math.min(100, percent)}%;background:${colour}"></span></div>
+        <div class="foot">
+          <span>${fmt(key.used)} / ${fmt(key.limit)} characters · ${percent}% used</span>
+          <span>${fmt(key.left)} left · ${resets}</span>
+        </div>`;
+    } else {
+      body = `<div class="foot"><span style="color:var(--critical)">${esc(key.detail || key.status)}</span><span></span></div>`;
+    }
+    const badge = key.status === "ok"
+      ? `<span class="tag">${esc(key.tier || "free")}</span>`
+      : `<span class="tag critical">${esc(key.status)}</span>`;
+    return `<div class="key">
+      <div class="top">
+        <code>#${key.index} ${esc(key.masked)}</code>
+        ${key.active ? '<span class="tag info">in use</span>' : ""}
+        ${badge}
+        <span class="muted" style="font-size:12px">${fmt(key.calls_made)} calls made</span>
+        <button class="small danger" data-remove="${key.index}" style="margin-left:auto">Remove</button>
+      </div>
+      ${body}
+    </div>`;
+  }).join("");
+}
+
+function renderSpeech(speech) {
+  const backends = [...new Set(speech.filter(s => s.ok).map(s => s.backend))];
+  if (!backends.length) {
+    $("speech-chart").innerHTML = '<p class="empty">Nothing spoken yet this session.</p>';
+    $("speech-legend").innerHTML = "";
+    return;
+  }
+  const first = speech[0].at;
+  const series = backends.map((backend, i) => {
+    let total = 0;
+    const points = [[0, 0]];
+    for (const call of speech) {
+      if (!call.ok || call.backend !== backend) continue;
+      total += call.characters;
+      points.push([call.at - first, total]);
+    }
+    return { name: backend, colour: PALETTE[i % PALETTE.length], points };
+  });
+  $("speech-chart").innerHTML = areaChart(series);
+  $("speech-legend").innerHTML = series.map(s =>
+    `<span><i style="background:${s.colour}"></i>${esc(s.name)} · ${fmt(s.points[s.points.length - 1][1])} characters</span>`
+  ).join("");
+}
+
+function renderDeaths(stats) {
+  if (!stats || !Object.keys(stats).length) return '<p class="empty">Waiting for the statistics to arrive from the server…</p>';
+  let html = `<div class="metrics" style="margin-bottom:16px">
+    <div><div class="label">Deaths</div><div class="metric"><span class="big">${fmt(stats.deaths)}</span></div></div>
+    <div><div class="label">Since last</div><div class="metric"><span class="big">${fmt(stats.minutes_since_last_death)}</span><span class="muted">min</span></div></div>
+    <div><div class="label">Damage taken</div><div class="metric"><span class="big">${fmt(Math.round(stats.damage_taken))}</span></div></div>
+  </div>`;
+
+  html += "<h3>What killed them</h3>";
+  html += bars((stats.killed_by || []).map(k => ({ label: k.name, value: k.count })), { colour: "var(--critical)" });
+  html += "<h3>By cause</h3>";
+  html += bars((stats.deaths_by_cause || []).map(c => ({ label: c.cause, value: c.count })), { colour: "var(--warn)" });
+
+  const recent = stats.recent_deaths || [];
+  if (recent.length) {
+    html += "<h3>Most recent</h3>";
+    html += recent.slice().reverse().map(d =>
+      `<div class="row"><span class="name">${esc(d.message || d.cause)}</span>
+       <span class="value">${esc(d.dimension || "")} Y=${d.y ?? "?"}</span></div>`).join("");
+  }
+  return html;
+}
+
+function renderProgress(stats) {
+  if (!stats || !Object.keys(stats).length) return '<p class="empty">Waiting for the statistics…</p>';
+  let html = `<div class="metrics" style="margin-bottom:16px">
+    <div><div class="label">Mob kills</div><div class="metric"><span class="big">${fmt(stats.mob_kills)}</span></div></div>
+    <div><div class="label">Played</div><div class="metric"><span class="big">${stats.hours_played ?? 0}</span><span class="muted">h</span></div></div>
+    <div><div class="label">Walked</div><div class="metric"><span class="big">${fmt(stats.blocks_walked)}</span><span class="muted">blocks</span></div></div>
+  </div>`;
+  html += "<h3>Kills by creature</h3>";
+  html += bars((stats.kills_by_creature || []).map(k => ({ label: k.name, value: k.count })), { colour: "var(--ok)" });
+  html += "<h3>Blocks mined</h3>";
+  html += bars((stats.blocks_mined || []).map(b => ({ label: b.name, value: b.count })), { colour: "var(--info)" });
+  return html;
+}
+
+function renderInventory(player) {
+  if (!player) return '<p class="empty">Waiting for Minecraft…</p>';
+  const inv = player.inventory || {};
+  const items = inv.items || [];
+  let html = `<div class="row"><span class="name">Slots used</span>
+      <span class="value">${inv.slots_used ?? 0} used, ${inv.slots_free ?? 0} free</span></div>
+    <div class="row"><span class="name">Holding</span><span class="value">${esc(inv.holding || "nothing")}</span></div>`;
+  html += "<h3>Carrying</h3>";
+  html += items.length
+    ? bars(items.map(i => ({ label: i.name, value: i.count })), { colour: "var(--accent)" })
+    : '<p class="empty">Nothing at all.</p>';
+  return html;
+}
+
+function renderEquipment(player) {
+  if (!player) return '<p class="empty">Waiting for Minecraft…</p>';
+  const equipment = player.equipment || {};
+  const labels = { main_hand: "Main hand", off_hand: "Off hand", head: "Head",
+                   chest: "Chest", legs: "Legs", feet: "Feet" };
+  return Object.entries(labels).map(([slot, label]) => {
+    const item = equipment[slot] || "nothing";
+    const breaking = /about to break/.test(item);
+    return `<div class="row"><span class="name">${label}</span>
+      <span class="value" style="${breaking ? "color:var(--critical)" : ""}">${esc(item)}</span></div>`;
+  }).join("");
+}
+
+function renderFeed(events) {
+  if (!events.length) return '<p class="empty">Nothing yet.</p>';
+  return events.slice().reverse().map(e => `
+    <div class="line ${e.level.toLowerCase()}">
+      <span class="clock">${esc(e.t)}</span>
+      <span class="tag ${e.level.toLowerCase()}">${esc(e.level)}</span>
+      <span class="msg">${esc(e.msg)}</span>
+    </div>`).join("");
+}
+
+function renderReplies(replies) {
+  if (!replies.length) return '<p class="empty">Nothing said yet.</p>';
+  return replies.slice().reverse().map(r => `
+    <div class="reply">
+      <div class="meta">
+        <span>${esc(r.clock)}</span>
+        ${r.urgent ? '<span class="tag critical">urgent</span>' : ""}
+        <span>${r.seconds}s</span>
+        ${(r.tools || []).map(t => `<span class="tag info">${esc(t)}</span>`).join("")}
+      </div>
+      <p class="said">${esc(r.reply)}</p>
+    </div>`).join("");
+}
+
+/* ---------- settings ---------- */
+
+let settingsDrawn = false;
+
+function renderSettings(groups) {
+  const html = groups.map(group => `
+    <h3>${esc(group.group)}</h3>
+    ${group.fields.map(field => fieldHtml(field)).join("")}
+  `).join("");
+  $("settings").innerHTML = `<div style="display:grid;gap:0 26px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">${html}</div>`;
+
+  $("settings").querySelectorAll("[data-key]").forEach(input => {
+    const commit = () => saveSetting(input.dataset.key, value(input));
+    if (input.type === "range") {
+      input.addEventListener("input", () => input.nextElementSibling.value = input.value);
+      input.addEventListener("change", commit);
+    } else if (input.tagName === "SELECT" || input.type === "checkbox") {
+      input.addEventListener("change", commit);
+    } else {
+      input.addEventListener("blur", commit);
+      input.addEventListener("keydown", e => { if (e.key === "Enter" && input.tagName !== "TEXTAREA") input.blur(); });
+    }
+  });
+  settingsDrawn = true;
+}
+
+function value(input) {
+  if (input.type === "checkbox") return input.checked ? "true" : "false";
+  return input.value;
+}
+
+function fieldHtml(field) {
+  const id = `set-${field.key}`;
+  const help = field.help ? `<div class="help">${esc(field.help)}</div>` : "";
+  let control;
+
+  if (field.type === "textarea") {
+    control = `<textarea id="${id}" data-key="${field.key}">${esc(field.value)}</textarea>`;
+  } else if (field.type === "select") {
+    control = `<select id="${id}" data-key="${field.key}">${field.choices.map(choice =>
+      `<option ${choice === field.value ? "selected" : ""}>${esc(choice)}</option>`).join("")}</select>`;
+  } else if (field.type === "bool") {
+    control = `<label style="display:flex;align-items:center;gap:9px;color:var(--text)">
+      <input type="checkbox" id="${id}" data-key="${field.key}" style="width:auto"
+             ${String(field.value).toLowerCase() === "true" ? "checked" : ""}> Enabled</label>`;
+  } else if (field.type === "range") {
+    control = `<div class="withval">
+      <input type="range" id="${id}" data-key="${field.key}" min="${field.min}" max="${field.max}"
+             step="${field.step}" value="${esc(field.value)}"><output>${esc(field.value)}</output></div>`;
+  } else if (field.type === "secret") {
+    control = `<input id="${id}" data-key="${field.key}" placeholder="${esc(field.value) || "not set"}">`;
+  } else {
+    control = `<input id="${id}" data-key="${field.key}" type="${field.type === "number" ? "number" : "text"}"
+                      step="any" value="${esc(field.value)}">`;
+  }
+  const unit = field.unit ? ` <span class="muted">(${field.unit})</span>` : "";
+  return `<div class="field"><label for="${id}">${esc(field.label)}${unit}</label>${control}${help}</div>`;
+}
+
+async function saveSetting(key, newValue) {
+  const result = await postJSON("/api/settings", { key, value: newValue });
+  toast(result.message || (result.ok ? "Saved." : "Refused."), !result.ok);
+}
+
+/* ---------- polling ---------- */
+
+async function tick() {
+  try {
+    const data = await getJSON("/api/snapshot");
+    const bot = data.bot, player = data.player;
+
+    $("dot-mod").className = "dot " + (data.mod_live ? "on" : "off");
+    $("mod-world").textContent = player ? (player.world || "—") : "not running";
+    $("dot-bot").className = "dot " + (bot.watching ? "on" : "");
+    $("bot-uptime").textContent = bot.watching ? duration(bot.run_seconds) : "idle";
+    $("hd-backend").textContent = data.config.backend;
+    $("hd-model").textContent = data.config.model;
+    $("hd-clock").textContent = data.now;
+
+    $("m-calls").textContent = fmt(bot.gemini_calls);
+    $("m-latency").textContent = bot.average_latency;
+    $("m-events").textContent = fmt(Object.values(bot.levels).reduce((a, b) => a + b, 0));
+    $("m-chars").textContent = fmt(Object.values(bot.characters_spoken).reduce((a, b) => a + b, 0));
+
+    $("levels").innerHTML = bars(
+      ["CRITICAL", "NOTABLE", "INFO"].filter(l => bot.levels[l]).map(l =>
+        ({ label: l, value: bot.levels[l], colour: LEVEL_COLOUR[l] })));
+    $("types").innerHTML = bars(
+      Object.entries(bot.event_types).filter(([name]) => name).map(([name, count]) =>
+        ({ label: name, value: count })));
+
+    $("errors").innerHTML = bot.last_error
+      ? `<h3>Last error</h3><p class="empty" style="color:var(--critical)">${esc(bot.last_error.message)}</p>`
+      : "";
+
+    $("vitals").innerHTML = renderVitals(player);
+    $("inventory").innerHTML = renderInventory(player);
+    $("equipment").innerHTML = renderEquipment(player);
+    $("deaths").innerHTML = renderDeaths(player && player.stats);
+    $("progress").innerHTML = renderProgress(player && player.stats);
+    $("feed").innerHTML = renderFeed(bot.events);
+    $("replies").innerHTML = renderReplies(bot.replies);
+    renderSpeech(bot.speech);
+  } catch (e) {
+    $("dot-bot").className = "dot off";
+    $("bot-uptime").textContent = "disconnected";
+  }
+}
+
+async function loadKeys(force) {
+  try {
+    const data = await getJSON("/api/keys" + (force ? "?force=1" : ""));
+    $("keys").innerHTML = renderKeys(data.keys, data.loading);
+    $("keys").querySelectorAll("[data-remove]").forEach(button =>
+      button.addEventListener("click", async () => {
+        if (!confirm("Remove this key?")) return;
+        const result = await postJSON("/api/keys", { action: "remove", index: Number(button.dataset.remove) });
+        toast(result.message, !result.ok);
+        loadKeys(true);
+      }));
+  } catch (e) {
+    $("keys").innerHTML = '<p class="empty">Could not read the quotas.</p>';
+  }
+}
+
+async function loadSettings() {
+  if (settingsDrawn) return;
+  try { renderSettings((await getJSON("/api/settings")).groups); }
+  catch (e) { $("settings").innerHTML = '<p class="empty">Could not load the settings.</p>'; }
+}
+
+$("refresh-keys").addEventListener("click", () => loadKeys(true));
+$("add-key").addEventListener("click", async () => {
+  const input = $("new-key");
+  if (!input.value.trim()) return;
+  const result = await postJSON("/api/keys", { action: "add", key: input.value.trim() });
+  toast(result.message, !result.ok);
+  if (result.ok) input.value = "";
+  loadKeys(true);
+});
+
+tick();
+loadKeys(false);
+loadSettings();
+setInterval(tick, 2000);
+setInterval(() => loadKeys(false), 90000);
+</script>
+</body>
+</html>

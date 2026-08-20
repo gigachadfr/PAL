@@ -140,7 +140,11 @@ supported, and the bot falls through them automatically:
 
 See [python-script/README.md](python-script/README.md#voice) for setup.
 
-Everything else (personality prompt, models, intervals) is editable from the Settings menu.
+Everything else (personality prompt, models, intervals) is editable from the Settings menu — or
+from the **web dashboard**, which starts with the bot on `http://127.0.0.1:8765` and shows live
+vitals, inventory, deaths, the event feed, what the commentator said, and where every ElevenLabs
+key stands against its quota and reset date. See
+[python-script/README.md](python-script/README.md#dashboard).
 
 Audio playback needs one of `ffplay` (ffmpeg), `mpv` or `mpg123` installed.
 

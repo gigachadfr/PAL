@@ -156,6 +156,50 @@ earlier session instead of meeting you for the first time again.
 
 Saves are plain `{role, text}` JSON: readable, editable, and independent of the SDK.
 
+## Dashboard
+
+A local web dashboard starts with the bot and prints its address:
+
+```
+[DASH] Dashboard at http://127.0.0.1:8765
+```
+
+Menu option **6** reopens it. It shows, refreshed every two seconds:
+
+- **The player right now** — health, hunger and armour as gauges, XP, status effects,
+  what they are doing, where they are
+- **ElevenLabs keys** — for every key: characters used against the allowance, how many are
+  left, **when the quota resets**, how many calls it has served, and which one is in use
+- **Characters spoken over the session**, as a cumulative curve per backend, so you can see
+  Chatterbox carrying the load and Edge taking over when it does
+- **Deaths** — the count, what killed them, the breakdown by cause, the most recent ones
+- **Progress** — kills by creature, blocks mined, distance walked, hours played
+- **Inventory and equipment**, with durability, red when a tool is about to break
+- **The live event feed**, colour-coded by priority, and what the commentator actually said,
+  with its latency and which lookups it used
+- **Every setting**, editable in place — including the Chatterbox emotion sliders, which is a
+  far better way to tune them than editing `.env` between runs
+
+It runs on the standard library's `http.server`; there is no fifth dependency and no CDN, so it
+works with no internet beyond the ElevenLabs quota check. The charts are hand-drawn SVG.
+
+**It binds to `127.0.0.1`.** The settings endpoint reads and writes `.env`, which holds your API
+keys, so the server refuses any request that does not come from this machine — even if you point
+`DASHBOARD_HOST` at `0.0.0.0`. Keys are shown masked (`AIza…7890`) and never leave the machine in
+full; typing a new one replaces it, and submitting the masked value changes nothing. Only the
+settings listed on the page can be written, so the endpoint cannot be turned into an arbitrary
+`.env` editor.
+
+Opening the page asks ElevenLabs for each key's quota — all keys at once rather than one after
+another, so seven slow accounts cost one wait instead of seven. Answers are cached for 90
+seconds; **Refresh quotas** forces a new check.
+
+| Setting | Default | Notes |
+|---|---|---|
+| `DASHBOARD` | `true` | Set to `false` to not start the server at all |
+| `DASHBOARD_HOST` | `127.0.0.1` | Non-local requests are refused whatever this says |
+| `DASHBOARD_PORT` | `8765` | |
+
 ## What the AI knows, and what it can look up
 
 **Every message includes the player's condition at the moment of sending**, read fresh from the
@@ -233,6 +277,9 @@ Editable from the Settings menu (stored in `.env`):
 | `MAX_CHARS_PER_SEND` | `2000` | Budget per request; INFO lines are dropped first when over |
 | `HISTORY_TURNS` | `12` | Sliding conversation window, keeps token cost flat over a long session |
 | `AI_TOOLS` | `true` | Lets the model look up inventory, statistics and status. Needs PAL 2.2+ |
+| `DASHBOARD` | `true` | Local web dashboard — see above |
+| `DASHBOARD_HOST` | `127.0.0.1` | Loopback only |
+| `DASHBOARD_PORT` | `8765` | |
 
 A lower `SEND_INTERVAL` or a bigger model burns through your API quotas much faster.
 
@@ -253,6 +300,9 @@ bot still works, but it comments without knowing your health and the three looku
 
 **The AI says the statistics are not available yet** — the client asks the server for them every
 30 seconds, so they are empty for the first few seconds after joining a world.
+
+**The dashboard will not start** — something else is on port 8765; change `DASHBOARD_PORT`. The
+bot says so at startup and carries on regardless.
 
 **No audio** — install ffmpeg (`sudo pacman -S ffmpeg`, `sudo apt install ffmpeg`). The bot warns
 at startup if it cannot find a player.

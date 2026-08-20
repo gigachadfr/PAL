@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -41,6 +42,11 @@ try:
     import edge_tts
 except ImportError:  # optional: only needed for the free TTS backend
     edge_tts = None
+
+try:
+    from dashboard import Dashboard, Telemetry
+except ImportError:  # dashboard.py sits next to this file; the bot works fine without it
+    Dashboard = Telemetry = None
 
 # ==================== CONFIGURATION ====================
 ENV_FILE = ".env"
@@ -129,6 +135,10 @@ DEFAULTS = {
     # Lets the model call check_inventory / check_stats / check_player_state when it wants a
     # fact. Costs one extra request per lookup, so it can be switched off.
     "AI_TOOLS": "true",
+    # Local web dashboard. Bound to loopback on purpose: it can read and write .env.
+    "DASHBOARD": "true",
+    "DASHBOARD_HOST": "127.0.0.1",
+    "DASHBOARD_PORT": "8765",
     # Backend order in "auto": local Chatterbox if its server answers, then ElevenLabs, then Edge.
     # Force one with "chatterbox" / "elevenlabs" / "edge".
     "TTS_BACKEND": "auto",
@@ -919,8 +929,9 @@ class TTS:
     commentary keeps talking instead of going silent.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, telemetry=None):
         self.config = config
+        self.telemetry = telemetry
         self.backend = config.get("TTS_BACKEND").lower()
         # Set after an error that will not fix itself, so we stop paying the round-trip each time.
         self.elevenlabs_blocked = False
@@ -963,22 +974,31 @@ class TTS:
         return PAREN_TAG_PATTERN.sub(repair, normalized)
 
     def synthesize(self, text, urgent=False):
+        started = time.time()
+        backend, audio = self._synthesize(text, urgent)
+        if self.telemetry:
+            self.telemetry.add_speech(backend, len(text), time.time() - started, bool(audio))
+        return audio
+
+    def _synthesize(self, text, urgent=False):
+        """Returns the backend that produced the audio alongside it, so the dashboard can chart
+        which engine is actually doing the talking rather than which one was configured."""
         if self.backend in ("auto", "chatterbox") and self._chatterbox_available():
             audio = self._chatterbox(text, urgent)
             if audio:
-                return audio
+                return "chatterbox", audio
             print("[TTS] Chatterbox failed, falling back to Edge.")
 
         if self.backend in ("auto", "elevenlabs") and not self.elevenlabs_blocked:
             audio = self._elevenlabs(text)
             if audio:
-                return audio
+                return "elevenlabs", audio
             print("[TTS] ElevenLabs failed, falling back to Edge.")
 
         # Edge is the last resort whatever the chosen backend: a single failed request should
         # cost a different voice, not silence. Previously an explicit backend returned None
         # here and the commentary just went quiet.
-        return self._edge(text)
+        return "edge", self._edge(text)
 
     # ---- Chatterbox (local, GPU, emotional) ----
     def _chatterbox_available(self):
@@ -1275,10 +1295,11 @@ class TTS:
 
 # ==================== AI ====================
 class AIHandler:
-    def __init__(self, config, player, history=None, state=None):
+    def __init__(self, config, player, history=None, state=None, telemetry=None):
         self.config = config
         self.player = player
-        self.tts = TTS(config)
+        self.telemetry = telemetry
+        self.tts = TTS(config, telemetry=telemetry)
         self.client = genai.Client(api_key=config.get("GEMINI_API_KEY"))
         self.history = list(history) if history else []
         self.max_turns = config.get_int("HISTORY_TURNS")
@@ -1299,10 +1320,14 @@ class AIHandler:
             print("[AI] Chatterbox is live — performance cues enabled in the prompt.")
 
     def comment(self, prompt_text, urgent=False):
+        started = time.time()
+        self.used_tools = []
         try:
             reply = self._generate(prompt_text)
         except Exception as e:
             print(f"[ERROR] Gemini call failed: {e}")
+            if self.telemetry:
+                self.telemetry.add_error(e)
             return
 
         if not reply:
@@ -1311,6 +1336,9 @@ class AIHandler:
 
         print(f"[AI] {reply}")
         self._remember(prompt_text, reply)
+        if self.telemetry:
+            self.telemetry.add_reply(prompt_text, reply, time.time() - started, urgent,
+                                     self.used_tools)
 
         # `urgent` also drives the delivery, not just the timing: on Chatterbox it dials up the
         # emotional exaggeration so a death sounds like one.
@@ -1345,6 +1373,7 @@ class AIHandler:
             answers = []
             for call in calls:
                 result = self.tools.run(call.name, dict(call.args or {}))
+                self.used_tools.append(call.name)
                 print(f"[TOOL] {call.name}({dict(call.args or {})}) -> "
                       f"{result.splitlines()[0][:90] if result else 'nothing'}")
                 answers.append(genai_types.Part.from_function_response(
@@ -1391,10 +1420,11 @@ class AIHandler:
 class Commentator:
     """Applies the send policy: CRITICAL now, NOTABLE debounced, INFO on the timer."""
 
-    def __init__(self, config, ai, state=None):
+    def __init__(self, config, ai, state=None, telemetry=None):
         self.config = config
         self.ai = ai
         self.state = state
+        self.telemetry = telemetry
         self.pending = []
         self.scene = None
         self.last_send = time.time()
@@ -1404,6 +1434,8 @@ class Commentator:
         self.max_chars = config.get_int("MAX_CHARS_PER_SEND")
 
     def ingest(self, events):
+        if self.telemetry:
+            self.telemetry.add_events(events)
         urgent = False
         for event in events:
             level = event.get("lvl", "INFO")
@@ -1911,6 +1943,11 @@ class App:
         self.wizard = SetupWizard(self.config)
         # A server we started ourselves, kept up for the whole run.
         self.launcher = None
+        # Telemetry outlives an individual Start, so the dashboard keeps its history when you
+        # stop watching and start again.
+        self.telemetry = Telemetry() if Telemetry else None
+        self.state = PlayerState(self.config.get("LOG_DIRECTORY"))
+        self.dashboard = None
 
     def run(self):
         print("=" * 60)
@@ -1920,6 +1957,8 @@ class App:
         if not self.config.is_configured():
             self.wizard.run_initial_setup()
 
+        self._start_dashboard()
+
         # Loading the model costs ~12s and ~5GB of VRAM, so it happens once per run rather
         # than on every Start. It stays up until you quit.
         self._ensure_server()
@@ -1927,6 +1966,19 @@ class App:
             self._menu_loop()
         finally:
             self._shutdown_server()
+            if self.dashboard:
+                self.dashboard.stop()
+
+    def _start_dashboard(self):
+        if not Dashboard or self.config.get("DASHBOARD").lower() != "true":
+            return
+        dashboard = Dashboard(
+            self.config, self.telemetry, self.state,
+            host=self.config.get("DASHBOARD_HOST"),
+            port=self.config.get_int("DASHBOARD_PORT"),
+        )
+        if dashboard.start():
+            self.dashboard = dashboard
 
     def _ensure_server(self):
         if self.config.get("TTS_BACKEND").lower() not in ("auto", "chatterbox"):
@@ -1946,7 +1998,8 @@ class App:
 
     def _menu_loop(self):
         while True:
-            print("\n1. Start   2. Voice   3. API keys   4. Settings   5. Quit")
+            print("\n1. Start   2. Voice   3. API keys   4. Settings   5. Quit"
+                  + ("   6. Dashboard" if self.dashboard else ""))
             choice = input("> ").strip()
             if choice == "1":
                 self.start()
@@ -1959,6 +2012,9 @@ class App:
             elif choice == "5":
                 print("Bye.")
                 return
+            elif choice == "6" and self.dashboard:
+                print(f"[DASH] {self.dashboard.url}")
+                webbrowser.open(self.dashboard.url)
 
     def start(self):
         player = AudioPlayer()
@@ -1969,10 +2025,11 @@ class App:
         self._run(player)
 
     def _run(self, player):
-        state = PlayerState(self.config.get("LOG_DIRECTORY"))
-        ai = AIHandler(self.config, player, history=ChatHistory.choose(), state=state)
+        state = self.state
+        ai = AIHandler(self.config, player, history=ChatHistory.choose(), state=state,
+                       telemetry=self.telemetry)
         tailer = LogTailer(self.config.get("LOG_DIRECTORY"))
-        commentator = Commentator(self.config, ai, state=state)
+        commentator = Commentator(self.config, ai, state=state, telemetry=self.telemetry)
 
         found = tailer.find_log()
         if found:
@@ -1982,8 +2039,12 @@ class App:
 
         interval = self.config.get_float("CHECK_INTERVAL")
         print("\n[START] Watching. CRITICAL events interrupt, NOTABLE groups, INFO waits.")
+        if self.dashboard:
+            print(f"[DASH] Follow along at {self.dashboard.url}")
         print("Press Ctrl+C to stop.\n")
 
+        if self.telemetry:
+            self.telemetry.session_started()
         try:
             while True:
                 events = tailer.poll()
@@ -1996,6 +2057,8 @@ class App:
         except KeyboardInterrupt:
             print("\n[STOP] Stopped.")
         finally:
+            if self.telemetry:
+                self.telemetry.session_stopped()
             # Save even on Ctrl+C, which is how a session normally ends.
             ChatHistory.save(ai.history)
 
