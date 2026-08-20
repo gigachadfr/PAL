@@ -10,7 +10,7 @@ if you made video with it please credit this project
 
 ## 🪶 Overview
 
-- **Minecraft Version:** 26.1.2 — the `mc/1.21.1` branch builds the same mod for 1.21.1
+- **Minecraft Versions:** 26.1.2, 1.21.11 and 1.21.1, each in its own folder — see below
 - **Mod Loader:** Fabric (client-side only)
 - **Log Location:** `<your minecraft folder>/logs/player_actions/session.log`
 - **Format:** JSONL — one JSON event per line
@@ -32,11 +32,48 @@ observe and comment on gameplay based on the log.
 
 ---
 
+## 📁 One folder per Minecraft version
+
+Versions live side by side in this repository rather than on separate branches, so you can build
+any of them from one checkout:
+
+| Folder | Minecraft | Mappings | Mod version | State |
+|---|---|---|---|---|
+| [`26.1.2/`](26.1.2/) | 26.1.2 | none — 26.1 ships unobfuscated | 2.2.0 | Current |
+| [`1.21.11/`](1.21.11/) | 1.21.11 | Mojang official | 2.2.0 | Current, same feature set |
+| [`1.21.1/`](1.21.1/) | 1.21.1 | Yarn | 2.0.0 | **Behind** — see the note below |
+
+Each folder is a self-contained Gradle project:
+
+```bash
+cd 1.21.11
+./gradlew build          # -> build/libs/PAL-Fabric_1.21.11-2.2.0.jar
+```
+
+Jars are named **`PAL-<Loader>_<Minecraft version>-<mod version>.jar`**, because several builds
+of this mod now end up in the same downloads folder and `PAL-2.2.0.jar` said nothing about which
+game it was for.
+
+**Why 1.21.11 uses Mojang's mappings.** 1.21.11 is the last release Yarn covers, so either would
+work — but 26.1 is unobfuscated and therefore uses Mojang's own names. Building 1.21.11 the same
+way keeps one source tree instead of two translations of it: porting the whole mod across took
+exactly **one** change, `getDefaultClockTime()` → `getDayTime()`. Every mixin target — including
+the private `advancement` field and the `hurtServer` hook — is identical in both.
+
+**1.21.1 is a version behind.** It is the original Yarn build, and predates the live state file,
+the vanilla-statistics reader, the death history and the Fire Resistance fix. 1.21.1 also sits
+before several Minecraft refactors the newer code relies on (`hurtServer`, the equipment split in
+`Inventory`), so bringing it up to date is a real port rather than a copy. It still builds and
+still works as it did.
+
+---
+
 ## 🧱 Installation
 
-1. Install **Fabric Loader** for Minecraft 26.1.2 (or 1.21.1 from the `mc/1.21.1` branch).
+1. Install **Fabric Loader** for your Minecraft version.
 2. Install **Fabric API** (required).
-3. Drop the PAL `.jar` into your `mods` folder.
+3. Drop the matching PAL `.jar` into your `mods` folder — the file name tells you which
+   Minecraft version it is for.
 4. Launch the game — logging starts as soon as you join a world.
 
 The mod is client-side only. You can use it on any server without the server needing it.

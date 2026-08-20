@@ -1,0 +1,62 @@
+plugins {
+    // 1.21.11 is still obfuscated, so this is the remapping Loom plugin — unlike the 26.1.2
+    // build next door, which needs neither mappings nor a remap step.
+    id 'fabric-loom' version '1.17.19'
+    id 'maven-publish'
+    id 'java'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+// Output name: PAL-Fabric_1.21.11-2.2.0.jar — the loader and the Minecraft version are part of
+// the file name because several builds of this mod now live side by side, and "PAL-2.2.0.jar"
+// in a downloads folder said nothing about which game it was for.
+base {
+    archivesName = "${project.archives_base_name}-${project.mod_loader}_${project.minecraft_version}"
+}
+
+repositories {
+    // Add repositories to retrieve artifacts from in here.
+    // You should only use this when depending on other mods because
+    // Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
+    maven { url = "https://maven.shedaniel.me/" }
+    maven { url = "https://maven.terraformersmc.com/" }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    // Official Mojang names rather than Yarn. Yarn would work here — 1.21.11 is the last
+    // release it covers — but it would fork the source from the 26.1.2 build for no gain.
+    mappings loom.officialMojangMappings()
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+    // Fabric API
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+    it.options.encoding = "UTF-8"
+}
+
+java {
+    withSourcesJar()
+
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_${base.archivesName.get()}" }
+    }
+}

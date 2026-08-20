@@ -18,7 +18,8 @@ out/
 run/
 *.class
 *.jar
-!mod/gradle/wrapper/gradle-wrapper.jar
+# One per version folder (1.21.1/, 1.21.11/, 26.1.2/…)
+!*/gradle/wrapper/gradle-wrapper.jar
 
 # ---- Fabric Loom ----
 .fabric/

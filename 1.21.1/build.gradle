@@ -1,0 +1,71 @@
+plugins {
+    id 'fabric-loom' version '1.7.4'
+    id 'maven-publish'
+    id 'java'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+// Output name: PAL-Fabric_1.21.11-2.2.0.jar — the loader and the Minecraft version are part of
+// the file name because several builds of this mod now live side by side, and "PAL-2.2.0.jar"
+// in a downloads folder said nothing about which game it was for.
+base {
+    archivesName = "${project.archives_base_name}-${project.mod_loader}_${project.minecraft_version}"
+}
+
+repositories {
+    // Add repositories to retrieve artifacts from in here.
+    // You should only use this when depending on other mods because
+    // Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
+    maven { url "https://maven.shedaniel.me/" }
+    maven { url "https://maven.terraformersmc.com/" }
+}
+
+loom {
+    mixin {
+        defaultRefmapName = "playeractionlogger.refmap.json"
+    }
+}
+
+dependencies {
+    // Minecraft
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+    // Fabric API
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+    
+    // Gson for JSON handling (included in Minecraft)
+    implementation 'com.google.code.gson:gson:2.10.1'
+}
+
+processResources {
+    inputs.property "version", project.version
+
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+    it.options.encoding = "UTF-8"
+}
+
+java {
+    // Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
+    withSourcesJar()
+
+    // Lets Gradle locate a JDK 21 on its own, whatever JVM Gradle itself runs on.
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_${base.archivesName.get()}" }
+    }
+}

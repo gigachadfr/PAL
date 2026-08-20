@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "playeractionlogger",
+  "version": "${version}",
+
+  "name": "PAL",
+  "description": "Logs what the local player does to a JSONL file, for LLM commentary. Client-side only: works in singleplayer and on servers, and only ever logs your own player.",
+  "authors": [
+    "giga_chad_77"
+  ],
+  "contact": {
+    "Discord": "giga_chad_fr"
+  },
+
+  "license": "MIT",
+
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.gigachad.pal.PlayerActionLogger"
+    ]
+  },
+  "mixins": [
+    "playeractionlogger.mixins.json"
+  ],
+
+  "depends": {
+    "fabricloader": ">=0.19.0",
+    "minecraft": "~1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

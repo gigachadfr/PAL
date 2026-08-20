@@ -9,6 +9,13 @@ plugins {
 version = project.mod_version
 group = project.maven_group
 
+// Output name: PAL-Fabric_1.21.11-2.2.0.jar — the loader and the Minecraft version are part of
+// the file name because several builds of this mod now live side by side, and "PAL-2.2.0.jar"
+// in a downloads folder said nothing about which game it was for.
+base {
+    archivesName = "${project.archives_base_name}-${project.mod_loader}_${project.minecraft_version}"
+}
+
 repositories {
     // Add repositories to retrieve artifacts from in here.
     // You should only use this when depending on other mods because
@@ -51,6 +58,6 @@ java {
 
 jar {
     from("LICENSE") {
-        rename { "${it}_${project.archivesBaseName}" }
+        rename { "${it}_${base.archivesName.get()}" }
     }
 }

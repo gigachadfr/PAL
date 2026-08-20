@@ -1,0 +1,21 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.gigachad.pal.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [],
+  "client": [
+    "AdvancementToastAccessor",
+    "ClientPlayerInteractionManagerMixin",
+    "CraftingResultSlotMixin",
+    "DeathScreenMixin",
+    "LivingEntityMixin",
+    "MinecraftClientMixin",
+    "ServerDamageMixin",
+    "ServerKillMixin",
+    "ToastManagerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
