@@ -454,6 +454,86 @@ def _describe_free_vram():
     return "Could not read the GPU's free memory."
 
 
+# ==================== CHAT HISTORY ====================
+class ChatHistory:
+    """
+    Saves and restores the conversation so a session can pick up where the last one stopped.
+
+    Stored as plain {role, text} pairs rather than SDK objects, so a saved chat stays readable
+    and survives a change of client library.
+    """
+
+    @staticmethod
+    def _dir():
+        path = Path(CHAT_HISTORY_DIR)
+        path.mkdir(exist_ok=True)
+        return path
+
+    @staticmethod
+    def save(history, name=None):
+        if not history:
+            return None
+
+        plain = []
+        for message in history:
+            text = " ".join(part.text for part in message.parts if getattr(part, "text", None))
+            if text:
+                plain.append({"role": message.role, "text": text})
+        if not plain:
+            return None
+
+        name = name or datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = ChatHistory._dir() / f"{name}.json"
+        path.write_text(json.dumps(plain, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"[SAVE] Conversation saved to {path} ({len(plain)} messages)")
+        return path
+
+    @staticmethod
+    def list_saved():
+        return sorted(ChatHistory._dir().glob("*.json"), key=lambda p: p.stat().st_mtime,
+                      reverse=True)
+
+    @staticmethod
+    def load(path):
+        try:
+            plain = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"[ERROR] Could not read {path}: {e}")
+            return []
+
+        history = []
+        for message in plain:
+            text = message.get("text")
+            if not text:
+                continue
+            history.append(genai_types.Content(
+                role=message.get("role", "user"), parts=[genai_types.Part(text=text)]))
+        print(f"[LOAD] Restored {len(history)} messages from {Path(path).name}")
+        return history
+
+    @staticmethod
+    def choose():
+        """Offers the saved conversations. Returns the history to start from, possibly empty."""
+        saved = ChatHistory.list_saved()
+        if not saved:
+            return []
+
+        print(f"\n{len(saved)} saved conversation(s):")
+        print("  0. Start fresh")
+        for i, path in enumerate(saved[:10], 1):
+            age = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            try:
+                count = len(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                count = 0
+            print(f"  {i}. {path.stem}  ({age}, {count} messages)")
+
+        choice = input("\nLoad which? [0] ").strip()
+        if choice.isdigit() and 1 <= int(choice) <= min(10, len(saved)):
+            return ChatHistory.load(saved[int(choice) - 1])
+        return []
+
+
 # ==================== CHATTERBOX LAUNCHER ====================
 class ChatterboxLauncher:
     """
@@ -955,12 +1035,12 @@ class TTS:
 
 # ==================== AI ====================
 class AIHandler:
-    def __init__(self, config, player):
+    def __init__(self, config, player, history=None):
         self.config = config
         self.player = player
         self.tts = TTS(config)
         self.client = genai.Client(api_key=config.get("GEMINI_API_KEY"))
-        self.history = []
+        self.history = list(history) if history else []
         self.max_turns = config.get_int("HISTORY_TURNS")
         self.model = config.get("GEMINI_MODEL")
         self.system_prompt = config.get("SYSTEM_PROMPT") + FORMAT_RULES
@@ -1592,7 +1672,7 @@ class App:
         self._run(player)
 
     def _run(self, player):
-        ai = AIHandler(self.config, player)
+        ai = AIHandler(self.config, player, history=ChatHistory.choose())
         tailer = LogTailer(self.config.get("LOG_DIRECTORY"))
         commentator = Commentator(self.config, ai)
 
@@ -1617,6 +1697,9 @@ class App:
                 time.sleep(interval)
         except KeyboardInterrupt:
             print("\n[STOP] Stopped.")
+        finally:
+            # Save even on Ctrl+C, which is how a session normally ends.
+            ChatHistory.save(ai.history)
 
 
 if __name__ == "__main__":

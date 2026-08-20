@@ -148,6 +148,14 @@ Pick a voice with `EDGE_VOICE` (`en-US-AriaNeural`, `en-US-GuyNeural`, `fr-FR-De
 ElevenLabs has also announced that the current Default voices expire on **2026-12-31**, so
 `edge` is the safer long-term default.
 
+## Conversation history
+
+Every run is saved to `chat_history/` when it ends, including on Ctrl+C. On the next start the
+bot lists what it has and offers to carry on from one of them, so the commentator remembers the
+earlier session instead of meeting you for the first time again.
+
+Saves are plain `{role, text}` JSON: readable, editable, and independent of the SDK.
+
 ## How it decides when to speak
 
 The mod tags every event with a priority, and the bot acts on it:

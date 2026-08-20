@@ -254,6 +254,14 @@ public class PlayerActionLogger implements ClientModInitializer {
     private static String describeDamageSource(DamageSource source) {
         Entity attacker = source.getEntity();
         if (attacker != null) {
+            // Blowing up an End Crystal credits the damage to the player themselves; "a Player"
+            // reads as if someone else did it.
+            if (isLocalPlayer(attacker.getUUID())) {
+                Entity own = source.getDirectEntity();
+                return own != null && own != attacker
+                        ? "their own " + Names.readable(own)
+                        : "themselves";
+            }
             String name = Names.readable(attacker);
             Entity projectile = source.getDirectEntity();
             // "a Skeleton" reads better than "an arrow", but mentioning both is clearer still.

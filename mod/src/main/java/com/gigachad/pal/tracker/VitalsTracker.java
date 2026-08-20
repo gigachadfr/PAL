@@ -30,6 +30,10 @@ public class VitalsTracker implements Tracker {
     private int lastXpLevel = -1;
     private double lastFallDistance = 0.0;  // fallDistance is a double as of 26.1
     private float pendingDamage = 0f;
+    private static final long LEVEL_SETTLE_MS = 3_000L;
+    private int pendingLevel = 0;
+    private int reportedLevel = 0;
+    private long levelSettleAt = 0L;
     private boolean lowHealthFlagged = false;
     private boolean starvingFlagged = false;
 
@@ -38,6 +42,8 @@ public class VitalsTracker implements Tracker {
         lastHealth = -1f;
         lastFood = -1;
         lastXpLevel = -1;
+        pendingLevel = 0;
+        reportedLevel = 0;
         lastFallDistance = 0.0;
         lowHealthFlagged = false;
         starvingFlagged = false;
@@ -106,8 +112,19 @@ public class VitalsTracker implements Tracker {
         }
 
         // ---- level up -----------------------------------------------------
-        if (lastXpLevel >= 0 && xp > lastXpLevel && xp % 5 == 0) {
-            log.log(Level.INFO, "level_up", String.format("Reached experience level %d.", xp));
+        // A dragon kill dumps thousands of XP at once and the level counter sweeps upward,
+        // which used to emit a line for every multiple of 5 it passed through. Wait for the
+        // climb to settle, then report where it landed.
+        if (lastXpLevel >= 0 && xp > lastXpLevel) {
+            pendingLevel = xp;
+            levelSettleAt = System.currentTimeMillis() + LEVEL_SETTLE_MS;
+        } else if (pendingLevel > 0 && System.currentTimeMillis() >= levelSettleAt) {
+            if (pendingLevel % 5 == 0 || pendingLevel - reportedLevel >= 5) {
+                log.log(Level.INFO, "level_up",
+                        String.format("Reached experience level %d.", pendingLevel));
+                reportedLevel = pendingLevel;
+            }
+            pendingLevel = 0;
         }
 
         lastHealth = health;
