@@ -74,6 +74,10 @@ crafting milestones · advancements · chat sent and received · commands.
 Routine actions are **aggregated on purpose**: you get "mined 62 stone in 45s", not 62 separate
 lines. Drowning the interesting events in noise is what makes AI commentary go generic.
 
+Emergencies are checked against what can actually hurt you: standing in lava with Fire
+Resistance is not a `CRITICAL`, and neither is a long drop with Slow Falling or an elytra. A
+potion you drank on purpose should not have the commentator screaming every five seconds.
+
 ---
 
 ## 📸 The live state file

@@ -41,3 +41,4 @@ Thumbs.db
 # ---- Mod output logs ----
 logs/
 *.log
+voice_options.json

@@ -41,11 +41,16 @@ header {
 .dot.off { background: var(--critical); }
 
 /* ---- layout ---- */
-main { padding: 22px; display: grid; gap: 16px;
-       grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); align-items: start; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
-.card.wide { grid-column: span 2; }
-@media (max-width: 760px) { .card.wide { grid-column: span 1; } main { padding: 14px; } }
+/* Masonry by multi-column rather than grid: a grid row is as tall as its tallest card, and
+   with cards this uneven that left half the page empty. Columns let each card take exactly the
+   height it needs and the next one start right underneath. */
+main { padding: 22px; column-width: 400px; column-gap: 16px; }
+.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px;
+  break-inside: avoid; -webkit-column-break-inside: avoid; page-break-inside: avoid;
+  display: inline-block; width: 100%; margin: 0 0 16px;
+}
+@media (max-width: 760px) { main { padding: 14px; column-width: auto; columns: 1; } }
 
 /* ---- bits ---- */
 .metric { display: flex; align-items: baseline; gap: 8px; }
@@ -116,6 +121,8 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.danger:hover { border-color: var(--critical); color: var(--critical); }
 button.small { padding: 3px 9px; font-size: 12px; }
 .actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.addrow { display: flex; gap: 6px; margin-top: 6px; }
+.addrow input { font-size: 12px; padding: 6px 9px; }
 .toast {
   position: fixed; right: 20px; bottom: 20px; padding: 11px 16px; border-radius: 9px;
   background: var(--card-2); border: 1px solid var(--line); font-size: 13px;
@@ -162,7 +169,12 @@ svg { display: block; width: 100%; overflow: visible; }
     <div id="errors"></div>
   </section>
 
-  <section class="card wide">
+  <section class="card">
+    <h2>Gemini usage against the free tier</h2>
+    <div id="gemini"></div>
+  </section>
+
+  <section class="card">
     <h2>ElevenLabs keys — consumption and reset</h2>
     <div id="keys"><p class="empty">Loading quotas…</p></div>
     <div class="actions" style="margin-top:14px">
@@ -172,7 +184,7 @@ svg { display: block; width: 100%; overflow: visible; }
     </div>
   </section>
 
-  <section class="card wide">
+  <section class="card">
     <h2>Characters spoken over this session</h2>
     <div id="speech-chart"></div>
     <div class="legend" id="speech-legend"></div>
@@ -198,17 +210,17 @@ svg { display: block; width: 100%; overflow: visible; }
     <div id="equipment"><p class="empty">Waiting for Minecraft…</p></div>
   </section>
 
-  <section class="card wide">
+  <section class="card">
     <h2>Live events</h2>
     <div class="feed" id="feed"><p class="empty">Nothing yet.</p></div>
   </section>
 
-  <section class="card wide">
+  <section class="card">
     <h2>What it said</h2>
     <div id="replies"><p class="empty">Nothing said yet.</p></div>
   </section>
 
-  <section class="card wide">
+  <section class="card">
     <h2>Settings</h2>
     <div id="settings"><p class="empty">Loading…</p></div>
   </section>
@@ -340,22 +352,25 @@ function renderKeys(keys, loading) {
   if (!keys.length) return '<p class="empty">No ElevenLabs keys yet. Add one below, or stay on Chatterbox and Edge.</p>';
   return keys.map(key => {
     let body;
+    const sent = `<div class="foot"><span>This bot has sent ${fmt(key.characters_sent)} characters through it</span><span></span></div>`;
     if (key.status === "ok") {
       const percent = key.percent;
       const colour = percent > 90 ? "var(--critical)" : percent > 70 ? "var(--warn)" : "var(--ok)";
-      const resets = key.resets_in_hours === null || key.resets_in_hours === undefined
-        ? "no reset date"
+      const resets = (key.resets_in_hours === null || key.resets_in_hours === undefined)
+        ? (key.reset_stale ? "reset date is stale" : "no reset date")
         : key.resets_in_hours > 48
           ? `resets in ${Math.round(key.resets_in_hours / 24)} days`
           : `resets in ${key.resets_in_hours} h`;
       body = `
         <div class="bar"><span style="width:${Math.min(100, percent)}%;background:${colour}"></span></div>
         <div class="foot">
-          <span>${fmt(key.used)} / ${fmt(key.limit)} characters · ${percent}% used</span>
+          <span>${fmt(key.used)} / ${fmt(key.limit)} on the account · ${percent}% used</span>
           <span>${fmt(key.left)} left · ${resets}</span>
-        </div>`;
+        </div>
+        ${sent}
+        ${key.disagrees ? '<div class="foot"><span style="color:var(--warn)">The account still reports nothing used — its own counter is lagging.</span><span></span></div>' : ""}`;
     } else {
-      body = `<div class="foot"><span style="color:var(--critical)">${esc(key.detail || key.status)}</span><span></span></div>`;
+      body = `<div class="foot"><span style="color:var(--critical)">${esc(key.detail || key.status)}</span><span></span></div>${sent}`;
     }
     const badge = key.status === "ok"
       ? `<span class="tag">${esc(key.tier || "free")}</span>`
@@ -371,6 +386,44 @@ function renderKeys(keys, loading) {
       ${body}
     </div>`;
   }).join("");
+}
+
+function renderGemini(bot, config) {
+  const gauge = (label, used, limit, unit) => {
+    const percent = limit ? Math.min(100, used / limit * 100) : 0;
+    const colour = percent > 90 ? "var(--critical)" : percent > 70 ? "var(--warn)" : "var(--ok)";
+    return `<div style="margin-bottom:11px">
+      <div class="row" style="border:0;padding:0 0 4px">
+        <span class="name">${label}</span>
+        <span class="value">${fmt(used)} / ${fmt(limit)} ${unit}</span>
+      </div>
+      <div class="bar"><span style="width:${percent.toFixed(1)}%;background:${colour}"></span></div>
+    </div>`;
+  };
+
+  let html = gauge("This minute", bot.requests_last_minute, config.rpm_limit, "requests");
+  html += gauge("Today", bot.requests_last_day, config.rpd_limit, "requests");
+  html += `<div class="row"><span class="name">Requests sent</span>
+      <span class="value">${fmt(bot.requests_total)} since the bot started</span></div>`;
+  html += `<div class="row"><span class="name">Replies produced</span>
+      <span class="value">${fmt(bot.gemini_calls)}</span></div>`;
+
+  const overLimit = bot.quota_errors > 0;
+  html += `<div class="row"><span class="name">Refused for quota</span>
+      <span class="value" style="${overLimit ? "color:var(--critical)" : ""}">${fmt(bot.quota_errors)}
+      ${bot.seconds_since_quota_error !== null && bot.seconds_since_quota_error !== undefined
+        ? "· last " + duration(bot.seconds_since_quota_error) + " ago" : ""}</span></div>`;
+  html += `<div class="row"><span class="name">Other failures</span>
+      <span class="value">${fmt(bot.gemini_errors - bot.quota_errors)}</span></div>`;
+
+  if (overLimit) {
+    html += `<p class="help" style="color:var(--warn);margin-top:10px">A lookup costs a second
+      request, so a reply that checks the inventory counts twice. Raise
+      <b>Idle timer</b> or switch off <b>Allow lookups</b> to spend fewer.</p>`;
+  }
+  html += `<p class="help" style="margin-top:10px">The limits are the two settings below, not
+    something Google reports — the counts are measured here.</p>`;
+  return html;
 }
 
 function renderSpeech(speech) {
@@ -496,6 +549,21 @@ function renderSettings(groups) {
   `).join("");
   $("settings").innerHTML = `<div style="display:grid;gap:0 26px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">${html}</div>`;
 
+  $("settings").querySelectorAll("[data-options]").forEach(select => loadOptions(select));
+
+  $("settings").querySelectorAll("[data-addbtn]").forEach(button =>
+    button.addEventListener("click", async () => {
+      const field = button.dataset.addbtn;
+      const input = $("settings").querySelector(`[data-addfor="${field}"]`);
+      if (!input.value.trim()) return;
+      const result = await postJSON("/api/options", { field, value: input.value.trim() });
+      toast(result.message, !result.ok);
+      if (result.ok) {
+        input.value = "";
+        loadOptions($("settings").querySelector(`[data-options="${field}"]`));
+      }
+    }));
+
   $("settings").querySelectorAll("[data-key]").forEach(input => {
     const commit = () => saveSetting(input.dataset.key, value(input));
     if (input.type === "range") {
@@ -509,6 +577,23 @@ function renderSettings(groups) {
     }
   });
   settingsDrawn = true;
+}
+
+async function loadOptions(select) {
+  const field = select.dataset.options;
+  try {
+    const data = await getJSON("/api/options?field=" + encodeURIComponent(field));
+    if (!data.choices.length) return;  // keep whatever is configured rather than blanking it
+    select.innerHTML = data.choices.map(choice =>
+      `<option value="${esc(choice.value)}" ${choice.value === data.value ? "selected" : ""}>${esc(choice.label)}</option>`
+    ).join("");
+    if (data.note) {
+      const help = select.parentElement.querySelector(".help");
+      if (help) help.textContent = data.note;
+    }
+  } catch (e) {
+    /* leave the single current value in place */
+  }
 }
 
 function value(input) {
@@ -534,6 +619,16 @@ function fieldHtml(field) {
     control = `<div class="withval">
       <input type="range" id="${id}" data-key="${field.key}" min="${field.min}" max="${field.max}"
              step="${field.step}" value="${esc(field.value)}"><output>${esc(field.value)}</output></div>`;
+  } else if (field.type === "options") {
+    // Populated from /api/options once the form is on the page: the lists come from the
+    // backends themselves and one of them is a network call away.
+    control = `<select id="${id}" data-key="${field.key}" data-options="${field.key}">
+        <option value="${esc(field.value)}">${esc(field.value) || "loading…"}</option>
+      </select>
+      <div class="addrow">
+        <input placeholder="Add one the list is missing" data-addfor="${field.key}">
+        <button class="small" data-addbtn="${field.key}">Add</button>
+      </div>`;
   } else if (field.type === "secret") {
     control = `<input id="${id}" data-key="${field.key}" placeholder="${esc(field.value) || "not set"}">`;
   } else {
@@ -541,7 +636,8 @@ function fieldHtml(field) {
                       step="any" value="${esc(field.value)}">`;
   }
   const unit = field.unit ? ` <span class="muted">(${field.unit})</span>` : "";
-  return `<div class="field"><label for="${id}">${esc(field.label)}${unit}</label>${control}${help}</div>`;
+  const slot = help || (field.type === "options" ? '<div class="help"></div>' : "");
+  return `<div class="field"><label for="${id}">${esc(field.label)}${unit}</label>${control}${slot}</div>`;
 }
 
 async function saveSetting(key, newValue) {
@@ -580,6 +676,7 @@ async function tick() {
       ? `<h3>Last error</h3><p class="empty" style="color:var(--critical)">${esc(bot.last_error.message)}</p>`
       : "";
 
+    $("gemini").innerHTML = renderGemini(bot, data.config);
     $("vitals").innerHTML = renderVitals(player);
     $("inventory").innerHTML = renderInventory(player);
     $("equipment").innerHTML = renderEquipment(player);

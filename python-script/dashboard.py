@@ -36,6 +36,9 @@ SETTINGS_SCHEMA = [
             {"key": "SYSTEM_PROMPT", "label": "Personality prompt", "type": "textarea",
              "help": "The character. Output rules are appended automatically."},
             {"key": "GEMINI_MODEL", "label": "Gemini model", "type": "text"},
+            {"key": "GEMINI_RPM_LIMIT", "label": "Free-tier limit, per minute", "type": "number",
+             "help": "Used only to draw the gauge. Google changes these per model."},
+            {"key": "GEMINI_RPD_LIMIT", "label": "Free-tier limit, per day", "type": "number"},
             {"key": "SEND_INTERVAL", "label": "Idle timer", "type": "number", "unit": "s",
              "help": "How long a quiet stretch runs before the bot speaks anyway."},
             {"key": "NOTABLE_DEBOUNCE", "label": "Notable grouping", "type": "number", "unit": "s"},
@@ -51,8 +54,8 @@ SETTINGS_SCHEMA = [
         "fields": [
             {"key": "TTS_BACKEND", "label": "Backend", "type": "select",
              "choices": ["auto", "chatterbox", "elevenlabs", "edge"]},
-            {"key": "EDGE_VOICE", "label": "Edge voice", "type": "text"},
-            {"key": "VOICE_ID", "label": "ElevenLabs voice id", "type": "text"},
+            {"key": "EDGE_VOICE", "label": "Edge voice", "type": "options"},
+            {"key": "VOICE_ID", "label": "ElevenLabs voice", "type": "options"},
             {"key": "ELEVENLABS_MODEL", "label": "ElevenLabs model", "type": "text"},
         ],
     },
@@ -72,7 +75,7 @@ SETTINGS_SCHEMA = [
              "help": "Multiplies exaggeration on CRITICAL events, capped at 2.0."},
             {"key": "CHATTERBOX_MODE", "label": "Voice mode", "type": "select",
              "choices": ["predefined", "clone"]},
-            {"key": "CHATTERBOX_VOICE", "label": "Voice", "type": "text"},
+            {"key": "CHATTERBOX_VOICE", "label": "Voice", "type": "options"},
             {"key": "CHATTERBOX_USE_TAGS", "label": "Performance cues", "type": "bool"},
             {"key": "CHATTERBOX_AUTOSTART", "label": "Start the server automatically",
              "type": "bool"},
@@ -123,7 +126,12 @@ class Telemetry:
         self.levels = Counter()
         self.gemini_calls = 0
         self.gemini_errors = 0
+        self.quota_errors = 0
+        # One timestamp per request sent, kept for a day so the per-minute and per-day rates
+        # can both be read off the same list.
+        self.requests = deque(maxlen=20000)
         self.last_error = None
+        self.last_quota_error = None
         self.watching = False
 
     # ---- written by the bot -------------------------------------------------
@@ -166,10 +174,17 @@ class Telemetry:
                 "tools": tools,
             })
 
-    def add_error(self, message):
+    def add_request(self):
+        with self.lock:
+            self.requests.append(time.time())
+
+    def add_error(self, message, quota=False):
         with self.lock:
             self.gemini_errors += 1
             self.last_error = {"at": time.time(), "message": str(message)[:400]}
+            if quota:
+                self.quota_errors += 1
+                self.last_quota_error = time.time()
 
     def add_speech(self, backend, characters, seconds, ok):
         with self.lock:
@@ -190,7 +205,16 @@ class Telemetry:
                 if call["ok"]:
                     spoken[call["backend"]] += call["characters"]
             latencies = [r["seconds"] for r in self.replies]
+            now = time.time()
+            last_minute = sum(1 for at in self.requests if now - at < 60)
+            last_day = sum(1 for at in self.requests if now - at < 86400)
             return {
+                "requests_total": len(self.requests),
+                "requests_last_minute": last_minute,
+                "requests_last_day": last_day,
+                "quota_errors": self.quota_errors,
+                "seconds_since_quota_error":
+                    round(now - self.last_quota_error) if self.last_quota_error else None,
                 "uptime": round(time.time() - self.started),
                 "watching": self.watching,
                 "run_seconds": round(time.time() - self.run_started) if self.run_started else 0,
@@ -258,18 +282,23 @@ class KeyQuotas:
         if not keys:
             return []
         counts = self.config.elevenlabs_keys.get("usage_count", {})
+        chars = self.config.elevenlabs_keys.get("character_count", {})
         active = self.config.current_elevenlabs_key()
 
         with ThreadPoolExecutor(max_workers=min(8, len(keys))) as pool:
             return list(pool.map(
-                lambda pair: self._one(pair[0], pair[1], counts, active), enumerate(keys)))
+                lambda pair: self._one(pair[0], pair[1], counts, chars, active), enumerate(keys)))
 
-    def _one(self, index, key, counts, active):
+    def _one(self, index, key, counts, chars, active):
         entry = {
             "index": index + 1,
             "masked": mask(key),
             "active": key == active,
             "calls_made": counts.get(key, 0),
+            # What this bot has actually sent through the key. Kept separate from the account's
+            # own figure because the two have been seen disagreeing, and only one of them is
+            # something we can vouch for.
+            "characters_sent": chars.get(key, 0),
             "status": "unknown",
         }
         try:
@@ -299,9 +328,20 @@ class KeyQuotas:
             entry["detail"] = "The account replied with something unreadable."
             return entry
 
-        used = data.get("character_count", 0)
+        used = data.get("character_count", 0) or 0
         limit = data.get("character_limit", 0) or 0
         reset = data.get("next_character_count_reset_unix")
+
+        # A reset date in the past means the account has not been billed in a cycle — free
+        # accounts left idle report a stale one. Showing "resets in -5991 hours" is worse than
+        # admitting we do not know.
+        hours = None
+        if reset:
+            hours = round((reset - time.time()) / 3600, 1)
+            if hours < 0:
+                hours = None
+
+        sent = entry["characters_sent"]
         entry.update({
             "status": "ok",
             "tier": data.get("tier", "unknown"),
@@ -310,7 +350,11 @@ class KeyQuotas:
             "left": max(0, limit - used),
             "percent": round(used / limit * 100, 1) if limit else 0,
             "resets_unix": reset,
-            "resets_in_hours": round((reset - time.time()) / 3600, 1) if reset else None,
+            "resets_in_hours": hours,
+            "reset_stale": bool(reset) and hours is None,
+            # The account says one thing, our own tally says another. Worth surfacing rather
+            # than silently trusting whichever we happened to print.
+            "disagrees": sent > 0 and used == 0,
         })
         return entry
 
@@ -318,10 +362,11 @@ class KeyQuotas:
 class Dashboard:
     """The HTTP server and everything it needs to answer with."""
 
-    def __init__(self, config, telemetry, state, host="127.0.0.1", port=8765):
+    def __init__(self, config, telemetry, state, options=None, host="127.0.0.1", port=8765):
         self.config = config
         self.telemetry = telemetry
         self.state = state
+        self.options = options
         self.host = host
         self.port = port
         self.quotas = KeyQuotas(config)
@@ -369,6 +414,8 @@ class Dashboard:
                 "backend": self.config.get("TTS_BACKEND"),
                 "tools": self.config.get("AI_TOOLS").lower() == "true",
                 "log_directory": self.config.get("LOG_DIRECTORY"),
+                "rpm_limit": self.config.get_int("GEMINI_RPM_LIMIT"),
+                "rpd_limit": self.config.get_int("GEMINI_RPD_LIMIT"),
             },
         }
 
@@ -393,6 +440,19 @@ class Dashboard:
             return False, "Nothing changed."
         self.config.set(key, value)
         return True, f"{key} updated."
+
+    def voice_options(self, field):
+        if not self.options:
+            return {"choices": [], "value": "", "note": ""}
+        return self.options.for_field(field)
+
+    def add_voice_option(self, field, value):
+        if not self.options:
+            return False, "Voice lists are not available."
+        added, reason = self.options.add(field, value)
+        if added:
+            self.config.set(field, value.strip())
+        return added, reason
 
     def update_keys(self, action, payload):
         if action == "add":
@@ -450,6 +510,11 @@ class Dashboard:
                     self._send(200, dashboard.quotas.get(force="force=1" in self.path))
                 elif route == "/api/settings":
                     self._send(200, dashboard.settings())
+                elif route == "/api/options":
+                    field = ""
+                    if "field=" in self.path:
+                        field = self.path.split("field=")[1].split("&")[0]
+                    self._send(200, dashboard.voice_options(field))
                 else:
                     self._send(404, {"error": "No such endpoint."})
 
@@ -470,6 +535,10 @@ class Dashboard:
                     self._send(200 if ok else 400, {"ok": ok, "message": message})
                 elif route == "/api/keys":
                     ok, message = dashboard.update_keys(payload.get("action", ""), payload)
+                    self._send(200 if ok else 400, {"ok": ok, "message": message})
+                elif route == "/api/options":
+                    ok, message = dashboard.add_voice_option(
+                        payload.get("field", ""), str(payload.get("value", "")))
                     self._send(200 if ok else 400, {"ok": ok, "message": message})
                 else:
                     self._send(404, {"error": "No such endpoint."})

@@ -139,6 +139,11 @@ DEFAULTS = {
     "DASHBOARD": "true",
     "DASHBOARD_HOST": "127.0.0.1",
     "DASHBOARD_PORT": "8765",
+    # Free-tier ceilings for the configured model. Google changes these without warning and
+    # they differ per model, so they are settings rather than a table baked into the code —
+    # the dashboard measures the real usage and compares it against whatever you put here.
+    "GEMINI_RPM_LIMIT": "15",
+    "GEMINI_RPD_LIMIT": "1000",
     # Backend order in "auto": local Chatterbox if its server answers, then ElevenLabs, then Edge.
     # Force one with "chatterbox" / "elevenlabs" / "edge".
     "TTS_BACKEND": "auto",
@@ -212,16 +217,22 @@ class Config:
 
     def load_elevenlabs_keys(self):
         if not os.path.exists(API_KEYS_FILE):
-            empty = {"keys": [], "usage_count": {}}
+            empty = {"keys": [], "usage_count": {}, "character_count": {}}
             with open(API_KEYS_FILE, "w", encoding="utf-8") as f:
                 json.dump(empty, f, indent=2)
             return empty
         try:
             with open(API_KEYS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
             print(f"[WARN] Could not read {API_KEYS_FILE} ({e}); starting empty.")
-            return {"keys": [], "usage_count": {}}
+            return {"keys": [], "usage_count": {}, "character_count": {}}
+        # character_count arrived after usage_count; a file written by an older version has
+        # the calls but not the characters.
+        data.setdefault("keys", [])
+        data.setdefault("usage_count", {})
+        data.setdefault("character_count", {})
+        return data
 
     def save_elevenlabs_keys(self):
         with open(API_KEYS_FILE, "w", encoding="utf-8") as f:
@@ -233,6 +244,7 @@ class Config:
             return False
         self.elevenlabs_keys["keys"].append(api_key)
         self.elevenlabs_keys["usage_count"][api_key] = 0
+        self.elevenlabs_keys["character_count"][api_key] = 0
         self.save_elevenlabs_keys()
         print("[OK] API key added.")
         return True
@@ -242,6 +254,7 @@ class Config:
             return False
         key = self.elevenlabs_keys["keys"].pop(index)
         self.elevenlabs_keys["usage_count"].pop(key, None)
+        self.elevenlabs_keys["character_count"].pop(key, None)
         self.current_key_index = 0
         self.save_elevenlabs_keys()
         print("[OK] API key removed.")
@@ -260,9 +273,18 @@ class Config:
         print(f"[SWITCH] Now using ElevenLabs key #{self.current_key_index + 1}")
         return True
 
-    def increment_usage(self, api_key):
+    def increment_usage(self, api_key, characters=0):
+        """
+        Records what a key has actually spent.
+
+        Characters are tracked alongside the call count because that is the unit ElevenLabs
+        bills in — and because the account's own reported figure has been seen sitting at zero
+        while the bot was plainly synthesising, which leaves nothing to reconcile against.
+        """
         counts = self.elevenlabs_keys["usage_count"]
         counts[api_key] = counts.get(api_key, 0) + 1
+        chars = self.elevenlabs_keys.setdefault("character_count", {})
+        chars[api_key] = chars.get(api_key, 0) + characters
         self.save_elevenlabs_keys()
 
     def get(self, key, default=""):
@@ -1143,7 +1165,7 @@ class TTS:
             return None
 
         if response.status_code == 200:
-            self.config.increment_usage(api_key)
+            self.config.increment_usage(api_key, len(text))
             return response.content
 
         detail = response.text[:200]
@@ -1293,7 +1315,169 @@ class TTS:
         )
 
 
+# ==================== VOICE OPTIONS ====================
+class VoiceOptions:
+    """
+    The lists behind the dashboard's voice pickers.
+
+    Typing a voice id by hand is how you end up with a silent bot and a typo you cannot see,
+    so the dashboard offers what each backend actually has: Edge's catalogue, the voices your
+    ElevenLabs account can use, and whatever the Chatterbox server is holding. Anything you add
+    yourself is remembered in voice_options.json, so a voice added once stays in the list even
+    though no backend advertises it.
+
+    Every lookup is a network call, so results are cached and a failure falls back to the
+    built-in list rather than leaving an empty dropdown.
+    """
+
+    FILE = "voice_options.json"
+    CACHE_S = 120
+    FIELDS = ("EDGE_VOICE", "VOICE_ID", "CHATTERBOX_VOICE")
+
+    # Enough to be useful when edge-tts cannot be reached; it normally lists about 200.
+    BUILTIN_EDGE = [
+        "en-US-AriaNeural", "en-US-JennyNeural", "en-US-GuyNeural", "en-US-AnaNeural",
+        "en-US-ChristopherNeural", "en-US-EricNeural", "en-US-MichelleNeural",
+        "en-GB-SoniaNeural", "en-GB-RyanNeural", "en-AU-NatashaNeural",
+        "fr-FR-DeniseNeural", "fr-FR-HenriNeural", "fr-FR-EloiseNeural",
+    ]
+
+    def __init__(self, config):
+        self.config = config
+        self.custom = self._load()
+        self._cache = {}
+        self._fetched = {}
+
+    # ---- persistence -------------------------------------------------------
+
+    def _load(self):
+        try:
+            with open(self.FILE, "r", encoding="utf-8") as f:
+                stored = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            stored = {}
+        return {field: list(stored.get(field, [])) for field in self.FIELDS}
+
+    def _save(self):
+        try:
+            with open(self.FILE, "w", encoding="utf-8") as f:
+                json.dump(self.custom, f, indent=2)
+        except OSError as e:
+            print(f"[WARN] Could not save {self.FILE}: {e}")
+
+    def add(self, field, value):
+        """Remembers a voice the backends do not advertise. Returns (added, reason)."""
+        value = (value or "").strip()
+        if field not in self.FIELDS:
+            return False, f"{field} is not a voice setting."
+        if not value:
+            return False, "Nothing to add."
+        if value in self.custom[field]:
+            return False, "That one is already in your list."
+        self.custom[field].append(value)
+        self._save()
+        self._fetched.pop(field, None)  # rebuild the merged list on the next read
+        return True, f"{value} added and selected."
+
+    # ---- what the dashboard asks for ---------------------------------------
+
+    def for_field(self, field):
+        if field not in self.FIELDS:
+            return {"choices": [], "value": "", "note": ""}
+
+        age = time.time() - self._fetched.get(field, 0)
+        if field not in self._cache or age > self.CACHE_S:
+            self._cache[field] = self._build(field)
+            self._fetched[field] = time.time()
+
+        choices = list(self._cache[field])
+        current = self.config.get(field)
+        known = {choice["value"] for choice in choices}
+
+        for value in self.custom[field]:
+            if value not in known:
+                choices.append({"value": value, "label": f"{value} (added by you)"})
+                known.add(value)
+
+        # Whatever is configured must always be in the list, or opening the page would look
+        # like it had silently changed the setting. Added after the custom entries, and only
+        # when still missing, so a voice you added yourself is not listed twice.
+        if current and current not in known:
+            choices.insert(0, {"value": current, "label": f"{current} (current)"})
+        return {"choices": choices, "value": current, "note": self._note(field)}
+
+    def _note(self, field):
+        if field == "VOICE_ID":
+            return "Only 'premade' voices work on the free ElevenLabs tier; the rest return 402."
+        if field == "CHATTERBOX_VOICE":
+            return ("Predefined voices come from the server; in clone mode this lists the "
+                    "reference audio files instead.")
+        return "Run 'edge-tts --list-voices' to see the full catalogue."
+
+    def _build(self, field):
+        if field == "EDGE_VOICE":
+            return self._edge_voices()
+        if field == "VOICE_ID":
+            return self._elevenlabs_voices()
+        return self._chatterbox_voices()
+
+    def _edge_voices(self):
+        if edge_tts:
+            try:
+                voices = asyncio.run(edge_tts.list_voices())
+                found = [
+                    {"value": v["ShortName"],
+                     "label": f"{v['ShortName']}  ({v.get('Gender', '?')}, {v.get('Locale', '?')})"}
+                    for v in voices if v.get("ShortName")
+                ]
+                if found:
+                    return sorted(found, key=lambda c: c["value"])
+            except Exception as e:
+                print(f"[VOICES] Could not list Edge voices ({e}); using the built-in list.")
+        return [{"value": name, "label": name} for name in self.BUILTIN_EDGE]
+
+    def _elevenlabs_voices(self):
+        choices = [{"value": voice_id, "label": f"{name}  (default)"}
+                   for name, voice_id in ELEVENLABS_DEFAULT_VOICES.items()]
+        known = {choice["value"] for choice in choices}
+
+        api_key = self.config.current_elevenlabs_key()
+        if not api_key:
+            return choices
+        try:
+            response = requests.get("https://api.elevenlabs.io/v1/voices",
+                                    headers={"xi-api-key": api_key}, timeout=10)
+            if response.status_code != 200:
+                return choices
+            for voice in response.json().get("voices", []):
+                voice_id, name = voice.get("voice_id"), voice.get("name", "?")
+                if not voice_id or voice_id in known:
+                    continue
+                category = voice.get("category", "?")
+                warning = "" if category == "premade" else " — needs a paid plan"
+                choices.append({"value": voice_id, "label": f"{name}  ({category}){warning}"})
+                known.add(voice_id)
+        except (requests.RequestException, ValueError):
+            pass
+        return choices
+
+    def _chatterbox_voices(self):
+        tts = TTS(self.config)
+        clone = self.config.get("CHATTERBOX_MODE").lower() == "clone"
+        try:
+            names = tts.list_reference_files() if clone else tts.list_predefined_voices()
+        except Exception:
+            names = []
+        return [{"value": name, "label": name} for name in names]
+
+
 # ==================== AI ====================
+def _is_quota_error(error):
+    """A 429 is worth separating from a network blip: it means waiting, not retrying."""
+    text = str(error)
+    return "429" in text or "RESOURCE_EXHAUSTED" in text or "quota" in text.lower()
+
+
 class AIHandler:
     def __init__(self, config, player, history=None, state=None, telemetry=None):
         self.config = config
@@ -1327,7 +1511,7 @@ class AIHandler:
         except Exception as e:
             print(f"[ERROR] Gemini call failed: {e}")
             if self.telemetry:
-                self.telemetry.add_error(e)
+                self.telemetry.add_error(e, quota=_is_quota_error(e))
             return
 
         if not reply:
@@ -1358,6 +1542,11 @@ class AIHandler:
         ]
 
         for _ in range(MAX_TOOL_ROUNDS):
+            # Counted before the call, and once per round: a reply that needed a lookup costs
+            # two requests against the quota, and the rate limit does not care that they were
+            # the same reply.
+            if self.telemetry:
+                self.telemetry.add_request()
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=contents,
@@ -1947,6 +2136,7 @@ class App:
         # stop watching and start again.
         self.telemetry = Telemetry() if Telemetry else None
         self.state = PlayerState(self.config.get("LOG_DIRECTORY"))
+        self.options = VoiceOptions(self.config)
         self.dashboard = None
 
     def run(self):
@@ -1973,7 +2163,7 @@ class App:
         if not Dashboard or self.config.get("DASHBOARD").lower() != "true":
             return
         dashboard = Dashboard(
-            self.config, self.telemetry, self.state,
+            self.config, self.telemetry, self.state, options=self.options,
             host=self.config.get("DASHBOARD_HOST"),
             port=self.config.get_int("DASHBOARD_PORT"),
         )

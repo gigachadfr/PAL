@@ -4,6 +4,7 @@ import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
 import com.gigachad.pal.util.Names;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.monster.Creeper;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.phys.AABB;
@@ -60,12 +61,19 @@ public class DangerTracker implements Tracker {
         }
 
         // ---- standing in lava --------------------------------------------
-        if (player.isInLava()) {
+        // Fire Resistance makes a lava bath a non-event, and shouting CRITICAL every five
+        // seconds through a potion the player drank on purpose floods the commentator with
+        // emergencies while nothing is happening. The same goes for fire.
+        if (player.isInLava() && !player.hasEffect(MobEffects.FIRE_RESISTANCE)) {
             log.logThrottled(Level.CRITICAL, "in_lava", "In the lava and burning.", 5_000L);
         }
 
         // ---- a long fall in progress -------------------------------------
-        if (player.fallDistance > 10.0f && !player.isFallFlying()) {
+        // Slow Falling is the same story as Fire Resistance: a drop that cannot hurt is not an
+        // emergency. An elytra was already excluded for the same reason.
+        if (player.fallDistance > 10.0f
+                && !player.isFallFlying()
+                && !player.hasEffect(MobEffects.SLOW_FALLING)) {
             log.logThrottled(Level.CRITICAL, "falling",
                     String.format("Falling — already %.0f blocks down.", player.fallDistance),
                     4_000L);

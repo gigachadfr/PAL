@@ -177,8 +177,15 @@ Menu option **6** reopens it. It shows, refreshed every two seconds:
 - **Inventory and equipment**, with durability, red when a tool is about to break
 - **The live event feed**, colour-coded by priority, and what the commentator actually said,
   with its latency and which lookups it used
+- **Gemini usage** against the free tier: requests this minute and today, how many were
+  refused for quota, and how long ago. A reply that uses a lookup costs two requests, and the
+  gauge counts both — which is what a 429 is actually reacting to
 - **Every setting**, editable in place — including the Chatterbox emotion sliders, which is a
-  far better way to tune them than editing `.env` between runs
+  far better way to tune them than editing `.env` between runs, and dropdowns for the three
+  voice settings rather than an id to type from memory
+
+Cards are laid out as masonry rather than a grid: a grid row is as tall as its tallest card,
+and with cards this uneven half the page was empty.
 
 It runs on the standard library's `http.server`; there is no fifth dependency and no CDN, so it
 works with no internet beyond the ElevenLabs quota check. The charts are hand-drawn SVG.
@@ -193,6 +200,24 @@ settings listed on the page can be written, so the endpoint cannot be turned int
 Opening the page asks ElevenLabs for each key's quota — all keys at once rather than one after
 another, so seven slow accounts cost one wait instead of seven. Answers are cached for 90
 seconds; **Refresh quotas** forces a new check.
+
+**Two character counts, on purpose.** The account's own figure has been seen sitting at zero
+while the bot was plainly synthesising, so the card shows what ElevenLabs reports *and* what
+this bot has actually sent through that key, tracked per key in `elevenlabs_keys.json`. When
+the two disagree the card says so rather than picking one. A reset date in the past — which is
+what an idle free account reports — shows as "stale" instead of a negative countdown.
+
+### Voice pickers
+
+`EDGE_VOICE`, `VOICE_ID` and `CHATTERBOX_VOICE` are dropdowns filled from the backends
+themselves: Edge's full catalogue (~320 voices via `edge-tts`), the voices your ElevenLabs
+account can use with their category shown, and whatever the Chatterbox server is holding —
+predefined voices, or your reference audio files when it is in clone mode.
+
+Each one has an **add box** underneath for a voice the lists do not advertise. What you add is
+selected immediately and remembered in `voice_options.json`, so it stays in the dropdown from
+then on. If a list cannot be fetched the dropdown keeps whatever is configured rather than
+blanking it.
 
 | Setting | Default | Notes |
 |---|---|---|
@@ -280,6 +305,8 @@ Editable from the Settings menu (stored in `.env`):
 | `DASHBOARD` | `true` | Local web dashboard — see above |
 | `DASHBOARD_HOST` | `127.0.0.1` | Loopback only |
 | `DASHBOARD_PORT` | `8765` | |
+| `GEMINI_RPM_LIMIT` | `15` | Only used to draw the gauge — Google changes these per model |
+| `GEMINI_RPD_LIMIT` | `1000` | Same |
 
 A lower `SEND_INTERVAL` or a bigger model burns through your API quotas much faster.
 
