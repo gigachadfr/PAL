@@ -114,6 +114,10 @@ python test_voice.py --emotions   # sweep the exaggeration dial to pick your val
 python test_voice.py --text "..." # your own line
 ```
 
+The **Voice** menu also has *Hear the current voice*, which speaks one routine line and one
+critical line with your exact settings — the quickest way to check a voice and hear what the
+emotion boost actually does.
+
 `--emotions` is the one to use for tuning: it says the same death line at exaggeration 0.5, 1.0,
 1.4 and 2.0 so you can hear the difference and choose `CHATTERBOX_EXAGGERATION` plus
 `CHATTERBOX_URGENT_BOOST`. It never writes to your `.env`.

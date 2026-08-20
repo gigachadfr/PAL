@@ -1149,32 +1149,76 @@ class SetupWizard:
             print(f"  autostart   : {autostart}"
                   f"{' -> ' + self.config.get('CHATTERBOX_PATH') if autostart.lower() in ('1','true','yes','on') else ''}")
 
-            print("\n1. Switch engine")
-            print("2. Chatterbox - pick a built-in voice")
-            print("3. Chatterbox - clone a voice from an audio file")
-            print("4. Chatterbox - emotion levels")
-            print("5. Chatterbox - server (autostart / start it now)")
-            print("6. ElevenLabs voice")
-            print("7. Edge voice")
-            print("8. Back")
+            print("\n1. Hear the current voice")
+            print("2. Switch engine")
+            print("3. Chatterbox - pick a built-in voice")
+            print("4. Chatterbox - clone a voice from an audio file")
+            print("5. Chatterbox - emotion levels")
+            print("6. Chatterbox - server (autostart / start it now)")
+            print("7. ElevenLabs voice")
+            print("8. Edge voice")
+            print("9. Back")
 
             choice = input("> ").strip()
             if choice == "1":
-                self._pick_engine()
+                self._preview_voice(tts)
             elif choice == "2":
-                self._pick_chatterbox_predefined(tts)
+                self._pick_engine()
             elif choice == "3":
-                self._pick_chatterbox_clone(tts)
+                self._pick_chatterbox_predefined(tts)
             elif choice == "4":
-                self._set_emotion()
+                self._pick_chatterbox_clone(tts)
             elif choice == "5":
-                self._set_autostart()
+                self._set_emotion()
             elif choice == "6":
-                self._pick_elevenlabs(tts)
+                self._set_autostart()
             elif choice == "7":
-                self._pick_edge()
+                self._pick_elevenlabs(tts)
             elif choice == "8":
+                self._pick_edge()
+            elif choice == "9":
                 return
+
+    def _preview_voice(self, tts):
+        """
+        Speaks two lines with the settings exactly as configured: one routine, one critical.
+        Hearing them back to back is the only way to judge whether the emotion boost is doing
+        anything, since the two differ only in delivery.
+        """
+        player = AudioPlayer()
+        if not player.available() and platform.system() != "Windows":
+            print("\n[ERROR] No audio player found — install ffmpeg, mpv or mpg123.")
+            return
+
+        try:
+            base = float(self.config.get("CHATTERBOX_EXAGGERATION"))
+            boost = float(self.config.get("CHATTERBOX_URGENT_BOOST"))
+            critical = max(base, min(EXAGGERATION_CEILING, base * boost))
+        except ValueError:
+            base = critical = 0.0
+
+        print(f"\nEngine : {tts.backend}")
+        if tts.backend in ("auto", "chatterbox"):
+            print(f"Voice  : {self.config.get('CHATTERBOX_VOICE') or '(server default)'}"
+                  f"  [{self.config.get('CHATTERBOX_MODE')}]")
+            print(f"Emotion: {base} normally, {critical} on critical events")
+            if not tts._chatterbox_available():
+                print("Note   : Chatterbox is not answering, so you will hear the fallback.")
+
+        for label, line, urgent in (
+            ("routine (INFO)", "Twenty-one whole seconds to mine some grey rocks. Riveting.", False),
+            ("critical (CRITICAL)", "A creeper! Behind you! Move, you absolute walnut!", True),
+        ):
+            print(f"\n  [{label}] \"{line}\"")
+            audio = tts.synthesize(line, urgent=urgent)
+            if not audio:
+                print("     -> nothing came back")
+                continue
+            print(f"     -> {len(audio):,} bytes")
+            player.play(audio)
+            player.queue.join()
+
+        print("\nToo flat or too much? Adjust it in 'Chatterbox - emotion levels'.")
 
     def _set_autostart(self):
         """
