@@ -170,7 +170,9 @@ Editable from the Settings menu (stored in `.env`):
 | `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Chosen for its free-tier rate limits, which are more forgiving during a busy session. Google retires older model ids fairly aggressively; if you get a 404 the error message names the current replacement |
 | `TTS_BACKEND` | `auto` | `auto` / `chatterbox` / `elevenlabs` / `edge` |
 | `EDGE_VOICE` | `en-US-AriaNeural` | Free backend voice |
-| `CHATTERBOX_*` | see Voice section | Local emotional TTS |
+| `CHATTERBOX_EXAGGERATION` | `1.4` | 0.25–2.0, tuned expressive |
+| `CHATTERBOX_CFG_WEIGHT` | `0.3` | 0.2–1.0, low on purpose — see Voice section |
+| `CHATTERBOX_URGENT_BOOST` | `1.4` | Critical events land near the 2.0 ceiling |
 | `ELEVENLABS_MODEL` | `eleven_turbo_v2_5` | |
 | `SYSTEM_PROMPT` | tsundere commentator | Your personality prompt. Output rules (length, no coordinates read aloud) are appended automatically, so you can rewrite this freely. |
 | `SEND_INTERVAL` | `45` | Idle timer, seconds |

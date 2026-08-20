@@ -115,11 +115,14 @@ DEFAULTS = {
     "CHATTERBOX_URL": "http://localhost:8004",
     "CHATTERBOX_MODE": "predefined",  # "predefined" or "clone"
     "CHATTERBOX_VOICE": "",  # predefined voice id, or reference audio filename when cloning
-    "CHATTERBOX_EXAGGERATION": "0.8",  # 0.25-2.0; 0.5 is neutral, higher is dramatic
-    "CHATTERBOX_TEMPERATURE": "0.75",
-    # 0.2-1.0. Lower slows the delivery down, which offsets the speed-up that a high
-    # exaggeration causes. The docs suggest ~0.3 when going for expressive.
-    "CHATTERBOX_CFG_WEIGHT": "0.4",
+    # Tuned for a loud, theatrical commentator rather than a narrator. 1.4 sits well into
+    # the dramatic end, and the urgent boost takes critical events to ~1.96, just under
+    # the 2.0 ceiling — so a death is delivered at close to maximum intensity.
+    "CHATTERBOX_EXAGGERATION": "1.4",  # 0.25-2.0
+    "CHATTERBOX_TEMPERATURE": "0.85",  # 0.0-1.5; a little variation keeps it lively
+    # 0.2-1.0, and deliberately low: a high exaggeration rushes the delivery, and dropping
+    # cfg_weight is what buys the pacing back. 0.3 is the value the docs name for expressive.
+    "CHATTERBOX_CFG_WEIGHT": "0.3",
     # Multiplier applied to exaggeration on CRITICAL events (death, creeper, low health).
     "CHATTERBOX_URGENT_BOOST": "1.4",
     # Start the server automatically when it is not already running.
