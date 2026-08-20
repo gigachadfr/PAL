@@ -78,6 +78,8 @@ PARALINGUISTIC_RULES = (
 # are the real syntax; angle brackets are matched so a model slip can be repaired rather than
 # spoken. Anything else in brackets is left alone.
 _TAG_ALTERNATION = "|".join(re.escape(t) + "(?:es|s)?" for t in PARALINGUISTIC_TAGS)
+EXAGGERATION_CEILING = 5.0
+
 TAG_PATTERN = re.compile(rf"[\[<]\s*(?:{_TAG_ALTERNATION})\s*[\]>]", re.IGNORECASE)
 PAREN_TAG_PATTERN = re.compile(rf"\(\s*(?:{_TAG_ALTERNATION})\s*\)", re.IGNORECASE)
 
@@ -628,8 +630,10 @@ class TTS:
             exaggeration, boost = 1.0, 1.4
 
         # A death or a lit creeper should not be read in the same tone as "mined 60 stone".
+        # The ceiling must never drag the boosted value below the normal one: with a normal
+        # level of 4.0 an old hard cap of 2.0 made critical events *less* expressive.
         if urgent:
-            exaggeration = min(2.0, exaggeration * boost)
+            exaggeration = max(exaggeration, min(EXAGGERATION_CEILING, exaggeration * boost))
 
         payload = {
             "text": text,
@@ -1128,7 +1132,7 @@ class SetupWizard:
             print("2. Chatterbox - pick a built-in voice")
             print("3. Chatterbox - clone a voice from an audio file")
             print("4. Chatterbox - emotion levels")
-            print("5. Chatterbox - autostart the server")
+            print("5. Chatterbox - server (autostart / start it now)")
             print("6. ElevenLabs voice")
             print("7. Edge voice")
             print("8. Back")
@@ -1152,8 +1156,32 @@ class SetupWizard:
                 return
 
     def _set_autostart(self):
-        print("\nWhen on, starting the commentator also starts the Chatterbox server if it is")
-        print("not already running, and stops it again on exit.")
+        """
+        Autostart only fires from the main menu's "Start". Landing here with the server down and
+        autostart already on is confusing, so this menu can also launch it on the spot.
+        """
+        launcher = ChatterboxLauncher(self.config)
+        running = TTS(self.config)._chatterbox_available()
+
+        print(f"\nServer: {'running' if running else 'not running'}")
+        print("Autostart launches the server when you pick 'Start' from the main menu, and")
+        print("stops it again when you quit. It does not start it from this menu by itself.")
+        print("\n1. Turn autostart on / off")
+        if not running:
+            print("2. Start the server now (stays up after you leave this menu)")
+        print("0. Back")
+
+        choice = input("> ").strip()
+        if choice == "2" and not running:
+            if not self.config.get("CHATTERBOX_PATH"):
+                print("[ERROR] Set the server path first (option 1).")
+                return
+            if launcher.start():
+                # Deliberately not stopped on exit: it was started on request, not by a run.
+                print("[OK] Server is up and will stay up.")
+            return
+        if choice != "1":
+            return
 
         answer = input("Enable autostart? (y/n): ").strip().lower()
         if answer not in ("y", "n"):
