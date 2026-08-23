@@ -31,15 +31,25 @@ public class DangerTracker implements Tracker {
     /** How many more mobs must close in before an unchanged line-up is worth repeating. */
     private static final int ESCALATION_STEP = 2;
 
+    /**
+     * Below this the player has landed — on the ground, in water, in a boat, anywhere. Minecraft
+     * resets {@code fallDistance} to zero on landing, so it doubles as "the fall is over" without
+     * having to ask how it ended.
+     */
+    private static final float LANDED_BELOW = 0.5f;
+
     private String lastSignature = "";
     private int lastCloseCount = 0;
     private long lastMobReport = 0L;
+    /** One line per fall: set when a drop is announced, cleared once the player lands. */
+    private boolean fallAnnounced = false;
 
     @Override
     public void onSessionStart(LocalPlayer player, EventLog log) {
         lastSignature = "";
         lastCloseCount = 0;
         lastMobReport = 0L;
+        fallAnnounced = false;
     }
 
     @Override
@@ -71,12 +81,21 @@ public class DangerTracker implements Tracker {
         // ---- a long fall in progress -------------------------------------
         // Slow Falling is the same story as Fire Resistance: a drop that cannot hurt is not an
         // emergency. An elytra was already excluded for the same reason.
-        if (player.fallDistance > 10.0f
+        //
+        // Announced once per fall, not on a timer. A throttle still fires every few seconds for
+        // as long as the drop lasts, so a long fall arrived as a stream of CRITICAL lines saying
+        // the same thing with a bigger number — and CRITICAL interrupts whatever the commentator
+        // was saying, so one plunge could talk over everything else. The flag clears on landing,
+        // which is what keeps the next fall announceable.
+        if (player.fallDistance <= LANDED_BELOW) {
+            fallAnnounced = false;
+        } else if (!fallAnnounced
+                && player.fallDistance > 10.0f
                 && !player.isFallFlying()
                 && !player.hasEffect(MobEffects.SLOW_FALLING)) {
-            log.logThrottled(Level.CRITICAL, "falling",
-                    String.format("Falling — already %.0f blocks down.", player.fallDistance),
-                    4_000L);
+            fallAnnounced = true;
+            log.log(Level.CRITICAL, "falling",
+                    String.format("Falling — already %.0f blocks down.", player.fallDistance));
         }
 
         // ---- hostile mobs closing in -------------------------------------
