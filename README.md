@@ -6,12 +6,17 @@ It ships with a companion Python bot that speaks the commentary out loud.
 
 if you made video with it please credit this project
 
+![The dashboard](screen/dashboard.png)
+
+*The companion bot's dashboard: live vitals, the inventory with real item icons, ElevenLabs key
+quotas, the event feed, and Start/Stop for the commentator — no terminal needed.*
+
 ---
 
 ## 🪶 Overview
 
 - **Minecraft Versions:** 26.1.2, 1.21.11 and 1.21.1, each in its own folder — see below
-- **Mod Loader:** Fabric (client-side only)
+- **Mod Loader:** Fabric, plus a NeoForge build for 1.21.1 (client-side only)
 - **Log Location:** `<your minecraft folder>/logs/player_actions/session.log`
 - **Format:** JSONL — one JSON event per line
 - **Live state:** `player_state.json` in the same folder, rewritten every second
@@ -37,14 +42,15 @@ observe and comment on gameplay based on the log.
 Versions live side by side in this repository rather than on separate branches, so you can build
 any of them from one checkout:
 
-| Folder | Minecraft | Mappings | Mod version |
-|---|---|---|---|
-| [`26.1.2/`](26.1.2/) | 26.1.2 | none — 26.1 ships unobfuscated | 2.2.0 |
-| [`1.21.11/`](1.21.11/) | 1.21.11 | Mojang official | 2.2.0 |
-| [`1.21.1/`](1.21.1/) | 1.21.1 | Mojang official | 2.2.0 |
+| Folder | Minecraft | Loader | Mappings | Mod version |
+|---|---|---|---|---|
+| [`26.1.2/`](26.1.2/) | 26.1.2 | Fabric | none — 26.1 ships unobfuscated | 2.2.0 |
+| [`1.21.11/`](1.21.11/) | 1.21.11 | Fabric | Mojang official | 2.2.0 |
+| [`1.21.1/`](1.21.1/) | 1.21.1 | Fabric | Mojang official | 2.2.0 |
+| [`1.21.1(neoforge)/`](<1.21.1(neoforge)/>) | 1.21.1 | NeoForge 21.1 | Mojang official | 2.2.0 |
 
-**All three are the same mod.** One version number means one feature set, so a jar labelled
-2.2.0 behaves the same whichever game it is for.
+**All four are the same mod.** One version number means one feature set, so a jar labelled
+2.2.0 behaves the same whichever game — and whichever loader — it is for.
 
 Each folder is a self-contained Gradle project:
 
@@ -87,15 +93,63 @@ history and the Fire Resistance fix are all there.
 `playeractionlogger.refmap.json` names all nine. That is what catches a hook that silently stops
 matching, which is how an earlier port reached the game and crashed on a renamed field.
 
+### The NeoForge build
+
+Same source tree again. Because every folder already uses Mojang's official names — and NeoForge
+compiles *and runs* against those same names — the trackers, the log, the state exporter and
+nine of the ten mixins are byte-for-byte what the Fabric build has. Only the loader glue differs:
+
+| What | Fabric | NeoForge |
+|---|---|---|
+| Entry point | `ClientModInitializer` | `@Mod` + `@EventBusSubscriber` |
+| Game folder | `FabricLoader.getInstance().getGameDir()` | `FMLPaths.GAMEDIR.get()` |
+| Join / leave | `ClientPlayConnectionEvents` | `ClientPlayerNetworkEvent.LoggingIn/Out` |
+| Tick | `ClientTickEvents.END_CLIENT_TICK` | `ClientTickEvent.Post` |
+| Chat sent | `ClientSendMessageEvents.ALLOW_CHAT` | `ClientChatEvent` |
+| Chat received | `ClientReceiveMessageEvents.CHAT` | `ClientChatReceivedEvent` |
+| Commands typed | `ALLOW_COMMAND` | *no event* — see below |
+| Metadata | `fabric.mod.json` | `META-INF/neoforge.mods.toml` |
+
+**No Forgified Fabric API.** It would have worked, and it is the obvious way to move a Fabric mod
+across, but it buys nothing here: the mod used exactly four Fabric API callbacks and NeoForge has
+its own for all but one of them. Depending on FFAPI would mean every user installing another mod
+so that four listeners could keep their original spelling.
+
+**The exception is commands.** NeoForge has no client-side event for a command the player types:
+`ClientChatEvent` is chat only, and `RegisterClientCommandsEvent` declares commands rather than
+watching them. `ClientCommandMixin` hooks `ClientPacketListener.sendCommand` instead — the same
+technique the mod already uses for its nine other hooks, injected at `HEAD` without cancelling,
+so the command runs untouched.
+
+**The game folder is reached through one helper**, `util/GameDir`, rather than inline in the
+three classes that write files. It is the only call that differs, and keeping it in one place is
+what stops the two builds drifting apart.
+
+**No refmap here, on purpose.** Fabric runs on intermediary names and needs the mapping file;
+NeoForge runs on the same Mojang names it compiled against, so the mixins need no translation.
+The targets were checked all the same — all twelve `@Inject` targets across the ten mixins were
+resolved against Mojang's official `client.txt` for 1.21.1 before the build was called done.
+
 ---
 
 ## 🧱 Installation
+
+**On Fabric:**
 
 1. Install **Fabric Loader** for your Minecraft version.
 2. Install **Fabric API** (required).
 3. Drop the matching PAL `.jar` into your `mods` folder — the file name tells you which
    Minecraft version it is for.
 4. Launch the game — logging starts as soon as you join a world.
+
+**On NeoForge (1.21.1):**
+
+1. Install **NeoForge 21.1** for Minecraft 1.21.1.
+2. Drop `PAL-NeoForge_1.21.1-2.2.0.jar` into your `mods` folder.
+3. Launch the game.
+
+Nothing else is needed — in particular **not Forgified Fabric API**. The NeoForge build uses
+NeoForge's own events, so it adds no dependency of its own and drops straight into a modpack.
 
 The mod is client-side only. You can use it on any server without the server needing it.
 

@@ -1,0 +1,17 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        maven {
+            name = 'NeoForged'
+            url = 'https://maven.neoforged.net/releases'
+        }
+    }
+}
+
+plugins {
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
+
+// No brackets: the folder is "1.21.1(neoforge)" to sit alongside the other builds, but Gradle
+// puts the project name into file paths and artefact coordinates, where brackets cause trouble.
+rootProject.name = "PAL-1.21.1-neoforge"

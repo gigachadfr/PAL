@@ -1,0 +1,33 @@
+modLoader = "javafml"
+loaderVersion = "[4,)"
+license = "MIT"
+issueTrackerURL = "https://github.com/gigachadfr/PAL/issues"
+
+[[mods]]
+modId = "playeractionlogger"
+version = "${version}"
+displayName = "PAL"
+authors = "giga_chad_77"
+description = '''
+Logs what the local player does to a JSONL file, for LLM commentary. Client-side only: works in
+singleplayer and on servers, and only ever logs your own player.
+'''
+
+# Client-side only. Declared so joining a server that does not have the mod is never refused on
+# its account, which is the whole point of a logger that reads only what your own client sees.
+[[mods.dependencies.playeractionlogger]]
+modId = "neoforge"
+type = "required"
+versionRange = "[21.1,)"
+ordering = "NONE"
+side = "CLIENT"
+
+[[mods.dependencies.playeractionlogger]]
+modId = "minecraft"
+type = "required"
+versionRange = "[1.21.1,1.21.2)"
+ordering = "NONE"
+side = "CLIENT"
+
+[[mixins]]
+config = "playeractionlogger.mixins.json"

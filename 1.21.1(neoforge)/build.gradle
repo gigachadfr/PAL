@@ -1,0 +1,73 @@
+plugins {
+    id 'net.neoforged.moddev' version '2.0.144'
+    id 'maven-publish'
+    id 'java'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+// Output name: PAL-NeoForge_1.21.1-2.2.0.jar. Same convention as the Fabric builds — with four
+// builds of this mod in circulation, the loader has to be in the file name.
+base {
+    archivesName = "${project.archives_base_name}-${project.mod_loader}_${project.minecraft_version}"
+}
+
+repositories {
+    maven { url "https://maven.neoforged.net/releases" }
+}
+
+neoForge {
+    version = project.neoforge_version
+
+    // NeoForge builds against Mojang's official names, which is exactly what the Fabric side of
+    // this repository already uses (`loom.officialMojangMappings()`). That is what makes one
+    // source tree serve both loaders: every Minecraft type, method and field is spelled the
+    // same on either side, so only the loader glue differs.
+
+    // No `parchment` block: it only supplies parameter names for the IDE, and would pin another
+    // version to keep in step for no effect on what is compiled.
+
+    runs {
+        client {
+            client()
+        }
+    }
+
+    mods {
+        playeractionlogger {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    // Gson ships inside Minecraft, as it does on Fabric.
+}
+
+processResources {
+    inputs.property "version", project.version
+
+    filesMatching("META-INF/neoforge.mods.toml") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+    it.options.encoding = "UTF-8"
+}
+
+java {
+    withSourcesJar()
+
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+jar {
+    from("../LICENSE") {
+        rename { "LICENSE_${base.archivesName.get()}" }
+    }
+}

@@ -1,0 +1,23 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.gigachad.pal.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "_comment": "No refmap: NeoForge compiles and runs against Mojang's official names, so the names in these mixins are already the names at runtime. The Fabric builds need one because they run on intermediary.",
+  "mixins": [],
+  "client": [
+    "AdvancementToastAccessor",
+    "ClientCommandMixin",
+    "MultiPlayerGameModeMixin",
+    "CraftingResultSlotMixin",
+    "DeathScreenMixin",
+    "LivingEntityMixin",
+    "MinecraftClientMixin",
+    "ServerDamageMixin",
+    "ServerKillMixin",
+    "ToastManagerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
