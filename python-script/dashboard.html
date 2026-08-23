@@ -6,6 +6,18 @@
 <title>Minecraft AI Commentator</title>
 <style>
 :root {
+  /*
+   * Tells the browser this page is already dark, so its own "force dark mode" leaves it alone.
+   *
+   * Without it, Chromium-based browsers — Opera's setting of the same name, Chrome's auto dark —
+   * treat the page as a light one to be inverted. The dark background survives that, but the
+   * item icons do not: they are PNGs, and force-dark runs them through an inversion filter, so
+   * cobblestone came out pink and half the inventory went white. Declaring a colour scheme is
+   * the supported way to opt out, and it fixes it for every visitor rather than asking each of
+   * them to change a browser setting.
+   */
+  color-scheme: dark;
+
   --bg: #0b0e14; --card: #141922; --card-2: #1b2130; --line: #232b3a;
   --text: #e6edf7; --dim: #8b98ad; --faint: #5b6779;
   --info: #58a6ff; --notable: #e3a008; --critical: #f85149;
@@ -41,16 +53,28 @@ header {
 .dot.off { background: var(--critical); }
 
 /* ---- layout ---- */
-/* Masonry by multi-column rather than grid: a grid row is as tall as its tallest card, and
-   with cards this uneven that left half the page empty. Columns let each card take exactly the
-   height it needs and the next one start right underneath. */
-main { padding: 22px; column-width: 400px; column-gap: 16px; }
+/*
+ * Masonry by real columns filled in JS, not by CSS multi-column.
+ *
+ * `column-width` was the obvious answer and it was wrong. Multi-column *balances*: it picks the
+ * column count from the width, then makes every column the same height. Because `break-inside:
+ * avoid` stops a column being shorter than the tallest card, one 900px card set the floor for
+ * all of them — so on a wide screen three columns already reached that height and the remaining
+ * two stayed completely empty. Half the window was unused.
+ *
+ * `layout()` instead measures each card and drops it into whichever column is currently
+ * shortest, which fills every column and keeps them level. The columns are plain flex children,
+ * so the cards themselves need no layout rules at all.
+ */
+main { padding: 22px; display: flex; align-items: flex-start; gap: 16px; }
+/* `main { display:flex }` outranks the browser's own `[hidden] { display:none }`, so without
+   this the settings page rendered underneath the dashboard instead of replacing it. */
+[hidden] { display: none !important; }
+.col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
 .card {
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px;
-  break-inside: avoid; -webkit-column-break-inside: avoid; page-break-inside: avoid;
-  display: inline-block; width: 100%; margin: 0 0 16px;
 }
-@media (max-width: 760px) { main { padding: 14px; column-width: auto; columns: 1; } }
+@media (max-width: 760px) { main { padding: 14px; } }
 
 /* ---- bits ---- */
 .metric { display: flex; align-items: baseline; gap: 8px; }
@@ -66,11 +90,58 @@ main { padding: 22px; column-width: 400px; column-gap: 16px; }
 .row .value { color: var(--dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .muted { color: var(--dim); }
 .empty { color: var(--faint); font-style: italic; padding: 8px 0; }
+
+/* ---- inventory grid ---------------------------------------------------- */
+/* Slot sizing is one variable so the grid, the icon and the count badge stay in proportion. */
+.inv { --slot: 46px; display: grid; gap: 6px; margin-top: 4px;
+       grid-template-columns: repeat(auto-fill, minmax(var(--slot), 1fr)); }
+.slot { position: relative; aspect-ratio: 1; border-radius: 5px;
+        background: var(--card-2); border: 1px solid var(--line); }
+.slot.filled { background: #0f1420; }
+/*
+ * Icons are drawn as a background rather than an <img> on purpose. Animated textures ship as
+ * vertical film strips (water is 16x512), and `100% auto` scales to the slot width so only the
+ * top frame shows. Still textures are square, so the same rule leaves them untouched.
+ */
+.slot .icon { position: absolute; inset: 5px;
+              background-repeat: no-repeat; background-position: top center;
+              background-size: 100% auto;
+              image-rendering: pixelated; }
+/* No texture found: first two letters, which still tells you what the slot holds. */
+.slot .letters { position: absolute; inset: 0; display: flex;
+                 align-items: center; justify-content: center;
+                 color: var(--faint); font-size: 13px; font-weight: 600;
+                 text-transform: uppercase; letter-spacing: .04em; }
+.slot .count { position: absolute; right: 2px; bottom: 1px;
+               font-size: 11px; font-weight: 700; color: #fff;
+               text-shadow: 1px 1px 0 #000, -1px 1px 0 #000, 1px -1px 0 #000, -1px -1px 0 #000;
+               font-variant-numeric: tabular-nums; pointer-events: none; }
+.inv-head { display: flex; justify-content: space-between; align-items: baseline;
+            gap: 10px; margin: 2px 0 8px; }
+.inv-note { color: var(--faint); font-size: 12px; font-style: italic; margin-top: 9px; }
+/* Equipment reuses .slot at a smaller size, laid out as a labelled list. */
+.gear { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 6px; margin-top: 2px; }
+.gear-slot { display: flex; align-items: center; gap: 8px; min-width: 0;
+             padding: 4px 6px; border-radius: 5px; background: var(--card-2); }
+.gear-slot .slot { --slot: 30px; width: 30px; flex: 0 0 30px; background: #0f1420; }
+.gear-text { min-width: 0; }
+.gear-text .label { color: var(--faint); font-size: 11px; text-transform: uppercase;
+                    letter-spacing: .06em; }
+.gear-text .what { color: var(--text); font-size: 12px;
+                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
        background: var(--card-2); color: var(--dim); border: 1px solid var(--line); }
 .tag.info { color: var(--info); border-color: rgba(88,166,255,.3); }
 .tag.notable { color: var(--notable); border-color: rgba(227,160,8,.3); }
 .tag.critical { color: var(--critical); border-color: rgba(248,81,73,.35); }
+.tag.warn { color: var(--warn); border-color: rgba(210,153,34,.35); }
+/* Said once for the whole card rather than repeated under every affected key. */
+.keynote { background: var(--card-2); border: 1px solid rgba(210,153,34,.3); border-radius: 9px;
+           padding: 11px 13px; margin-bottom: 14px; font-size: 12px; color: var(--dim);
+           line-height: 1.55; }
+.keynote b { color: var(--text); }
+.keynote code { font-size: 11px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 
 /* ---- feed ---- */
@@ -134,6 +205,34 @@ svg { display: block; width: 100%; overflow: visible; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--dim);
           margin-top: 10px; }
 .legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; margin-right: 5px; }
+
+/* ---- navigation and the settings page ---------------------------------- */
+.navbtn { padding: 5px 13px; border-radius: 999px; font-size: 12px; }
+#page-settings { padding: 22px; max-width: 1080px; margin: 0 auto; }
+.page-head { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+.page-head h1 { font-size: 20px; }
+/* Groups are cards of their own so a long settings page still has structure. */
+.sgroup { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 18px; margin-bottom: 16px; }
+.sgroup > h2 { margin-bottom: 16px; }
+.sgrid { display: grid; gap: 0 26px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+/* A wide control (a prompt, a folder picker) should not be squeezed into one grid column. */
+.field.wide { grid-column: 1 / -1; }
+
+/* ---- commentator control ----------------------------------------------- */
+.runstate { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.runstate .dot { width: 10px; height: 10px; }
+.runstate b { font-size: 15px; }
+.runline { color: var(--dim); font-size: 12px; margin-top: 10px; }
+.runline.bad { color: var(--critical); }
+
+/* ---- voice tester ------------------------------------------------------ */
+.vt { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.vt-out { margin-top: 12px; }
+.vt-out audio { width: 100%; margin-top: 8px; }
+.enginetag { font-size: 11px; padding: 2px 8px; border-radius: 999px;
+             background: var(--card-2); color: var(--dim); }
+.enginetag.live { color: var(--ok); }
 </style>
 </head>
 <body>
@@ -145,9 +244,17 @@ svg { display: block; width: 100%; overflow: visible; }
   <span class="pill">Voice <b id="hd-backend">—</b></span>
   <span class="pill">Model <b id="hd-model">—</b></span>
   <span class="pill" id="hd-clock">—</span>
+  <button id="nav-settings" class="navbtn">Settings</button>
 </header>
 
 <main>
+
+  <!-- First card on purpose: starting and stopping the bot was console-only, so the page was
+       useless on its own. Everything the menu can do lives in the interface now. -->
+  <section class="card" id="card-control">
+    <h2>Commentator</h2>
+    <div id="control"><p class="empty">Loading…</p></div>
+  </section>
 
   <section class="card">
     <h2>The player right now</h2>
@@ -220,12 +327,18 @@ svg { display: block; width: 100%; overflow: visible; }
     <div id="replies"><p class="empty">Nothing said yet.</p></div>
   </section>
 
-  <section class="card">
-    <h2>Settings</h2>
-    <div id="settings"><p class="empty">Loading…</p></div>
-  </section>
-
 </main>
+
+<!-- Settings is a page of its own rather than a card. As a card it was a 900px column that set
+     the masonry's floor and pushed everything else around; it is also the one part of the page
+     you read rather than watch. -->
+<section id="page-settings" hidden>
+  <div class="page-head">
+    <button id="back-dash" class="navbtn">← Back to dashboard</button>
+    <h1>Settings</h1>
+  </div>
+  <div id="settings"><p class="empty">Loading…</p></div>
+</section>
 
 <div class="toast" id="toast"></div>
 
@@ -350,7 +463,16 @@ function renderVitals(player) {
 function renderKeys(keys, loading) {
   if (loading) return '<p class="empty">Asking ElevenLabs where each key stands…</p>';
   if (!keys.length) return '<p class="empty">No ElevenLabs keys yet. Add one below, or stay on Chatterbox and Edge.</p>';
-  return keys.map(key => {
+  const limited = keys.filter(k => k.status === "limited");
+  const note = limited.length ? `<div class="keynote">
+      <b>${limited.length} key${limited.length === 1 ? "" : "s"} cannot read ${
+        limited.length === 1 ? "its" : "their"} own quota</b> — missing the
+      <code>user_read</code> permission. <b>Speech still works</b>; only the allowance and the
+      reset date are hidden, so the figures above are usage measured over a rolling 30 days.
+      To see the real quota, edit the key at elevenlabs.io → Profile → API Keys and tick
+      <b>User: Read</b>.
+    </div>` : "";
+  return note + keys.map(key => {
     let body;
     const sent = `<div class="foot"><span>This bot has sent ${fmt(key.characters_sent)} characters through it</span><span></span></div>`;
     if (key.status === "ok") {
@@ -369,12 +491,26 @@ function renderKeys(keys, loading) {
         </div>
         ${sent}
         ${key.disagrees ? '<div class="foot"><span style="color:var(--warn)">The account still reports nothing used — its own counter is lagging.</span><span></span></div>' : ""}`;
+    } else if (key.status === "limited") {
+      // The key works, it just cannot read its own account. Shown as a working key with a
+      // caveat rather than as a failure — it used to be reported as "rejected", which sent you
+      // looking for a broken key that was fine all along. The explanation is printed once for
+      // the whole card, below, instead of five identical times.
+      const known = key.used !== undefined && key.used !== null;
+      body = `
+        ${known ? `<div class="foot">
+            <span>${fmt(key.used)} characters used in the last ${key.window_days} days</span>
+            <span class="muted">estimate · allowance unknown</span>
+          </div>` : ""}
+        ${sent}`;
     } else {
       body = `<div class="foot"><span style="color:var(--critical)">${esc(key.detail || key.status)}</span><span></span></div>${sent}`;
     }
     const badge = key.status === "ok"
       ? `<span class="tag">${esc(key.tier || "free")}</span>`
-      : `<span class="tag critical">${esc(key.status)}</span>`;
+      : key.status === "limited"
+        ? '<span class="tag warn">no quota access</span>'
+        : `<span class="tag critical">${esc(key.status)}</span>`;
     return `<div class="key">
       <div class="top">
         <code>#${key.index} ${esc(key.masked)}</code>
@@ -487,31 +623,70 @@ function renderProgress(stats) {
   return html;
 }
 
+/*
+ * One tile, icon or not.
+ *
+ * `icon` is the texture key the server resolved out of the game's jars; when an item has none
+ * — a mod whose textures live somewhere unusual — the tile shows the first two letters instead
+ * of an empty square, so the slot still reads.
+ */
+function slot(name, count, icon) {
+  const label = count > 1 ? `${count}x ${name}` : name;
+  const inner = icon
+    ? `<i class="icon" style="background-image:url(/icon/${icon}.png)"></i>`
+    : `<span class="letters">${esc(name.slice(0, 2))}</span>`;
+  return `<div class="slot filled" title="${esc(label)}">${inner}` +
+         (count > 1 ? `<span class="count">${count}</span>` : "") + "</div>";
+}
+
 function renderInventory(player) {
   if (!player) return '<p class="empty">Waiting for Minecraft…</p>';
   const inv = player.inventory || {};
   const items = inv.items || [];
-  let html = `<div class="row"><span class="name">Slots used</span>
-      <span class="value">${inv.slots_used ?? 0} used, ${inv.slots_free ?? 0} free</span></div>
-    <div class="row"><span class="name">Holding</span><span class="value">${esc(inv.holding || "nothing")}</span></div>`;
-  html += "<h3>Carrying</h3>";
-  html += items.length
-    ? bars(items.map(i => ({ label: i.name, value: i.count })), { colour: "var(--accent)" })
-    : '<p class="empty">Nothing at all.</p>';
+  const used = inv.slots_used ?? 0, free = inv.slots_free ?? 0;
+
+  let html = `<div class="inv-head">
+      <span class="muted">Holding <b>${esc(inv.holding || "nothing")}</b></span>
+      <span class="value">${used} used · ${free} free</span>
+    </div>`;
+
+  if (!items.length) return html + '<p class="empty">Nothing at all.</p>';
+
+  html += '<div class="inv">' +
+    items.map(i => slot(i.name || "?", i.count || 0, i.icon)).join("") + "</div>";
+  // The mod totals identical items before publishing, so this is one tile per distinct item
+  // rather than a picture of the real 36 slots. Saying so beats implying a layout we do not have.
+  html += `<p class="inv-note">${items.length} distinct item${items.length === 1 ? "" : "s"},
+           identical ones added together.</p>`;
   return html;
 }
 
 function renderEquipment(player) {
   if (!player) return '<p class="empty">Waiting for Minecraft…</p>';
   const equipment = player.equipment || {};
+  const icons = player.equipment_icons || {};
   const labels = { main_hand: "Main hand", off_hand: "Off hand", head: "Head",
                    chest: "Chest", legs: "Legs", feet: "Feet" };
-  return Object.entries(labels).map(([slot, label]) => {
-    const item = equipment[slot] || "nothing";
+  return '<div class="gear">' + Object.entries(labels).map(([key, label]) => {
+    const item = equipment[key] || "nothing";
+    const empty = item === "nothing";
     const breaking = /about to break/.test(item);
-    return `<div class="row"><span class="name">${label}</span>
-      <span class="value" style="${breaking ? "color:var(--critical)" : ""}">${esc(item)}</span></div>`;
-  }).join("");
+    // The mod sends a sentence with the durability in it; the tile keeps it as the tooltip and
+    // shows the short form, because six slots of full sentences was unreadable.
+    const short = item.split("(")[0].trim();
+    // Same three-way fallback as the inventory: texture, else letters, else a genuinely empty
+    // slot. A shield has no item texture at all — Minecraft renders it from a model — so without
+    // the letters an equipped shield looked identical to a bare slot.
+    const tile = icons[key]
+      ? `<div class="slot filled"><i class="icon" style="background-image:url(/icon/${icons[key]}.png)"></i></div>`
+      : empty ? `<div class="slot"></div>`
+              : `<div class="slot filled"><span class="letters">${esc(short.slice(0, 2))}</span></div>`;
+    return `<div class="gear-slot" title="${esc(item)}">${tile}
+      <div class="gear-text"><div class="label">${label}</div>
+        <div class="what" style="${breaking ? "color:var(--critical)" :
+                                   empty ? "color:var(--faint)" : ""}">${esc(short)}</div>
+      </div></div>`;
+  }).join("") + "</div>";
 }
 
 function renderFeed(events) {
@@ -542,13 +717,124 @@ function renderReplies(replies) {
 
 let settingsDrawn = false;
 
-function renderSettings(groups) {
-  const html = groups.map(group => `
-    <h3>${esc(group.group)}</h3>
-    ${group.fields.map(field => fieldHtml(field)).join("")}
-  `).join("");
-  $("settings").innerHTML = `<div style="display:grid;gap:0 26px;grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">${html}</div>`;
+/*
+ * The voice tester, appended to whichever group owns the engine choice.
+ *
+ * The console's "Hear the current voice" spoke through the machine's own speakers; here the
+ * audio comes back over HTTP and plays in the page, which works the same whatever engine
+ * answered — and tells you which one actually did, since `auto` falls back silently.
+ */
+function voiceTesterHtml() {
+  return `<div class="field wide" style="margin-top:6px">
+      <label>Test the voice</label>
+      <div class="vt">
+        <button id="vt-normal">Speak a normal line</button>
+        <button id="vt-urgent">Speak a critical line</button>
+        <button id="vt-chatterbox">Start Chatterbox now</button>
+        <span id="vt-engine"></span>
+      </div>
+      <div class="help">Plays here, through the browser. Whichever engine answers is named
+        below — with <b>auto</b>, that is not always the one you picked.</div>
+      <div class="vt-out" id="vt-out"></div>
+    </div>`;
+}
 
+async function speakTest(urgent, button) {
+  const out = $("vt-out"), tag = $("vt-engine");
+  const was = button.textContent;
+  button.disabled = true;
+  button.textContent = "Synthesising…";
+  tag.className = "enginetag";
+  tag.textContent = "";
+  out.innerHTML = "";
+  try {
+    const response = await fetch("/api/voice/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ urgent }),
+    });
+    if (!response.ok) {
+      const problem = await response.json().catch(() => ({}));
+      out.innerHTML = `<p class="empty" style="color:var(--critical)">${
+        esc(problem.error || "The voice could not be synthesised.")}</p>`;
+      return;
+    }
+    const engine = response.headers.get("X-Voice-Engine") || "?";
+    const asked = response.headers.get("X-Voice-Requested") || "";
+    tag.className = "enginetag live";
+    tag.textContent = engine === asked || !asked ? engine : `${engine} (fell back from ${asked})`;
+    const url = URL.createObjectURL(await response.blob());
+    out.innerHTML = `<audio controls autoplay src="${url}"></audio>`;
+  } catch (e) {
+    out.innerHTML = '<p class="empty" style="color:var(--critical)">Could not reach the bot.</p>';
+  } finally {
+    button.disabled = false;
+    button.textContent = was;
+  }
+}
+
+/*
+ * Cloning, the last thing that was console-only.
+ *
+ * A path rather than a file picker: the dashboard only answers loopback, so the clip is already
+ * on this machine, and the bot hands the same path to Chatterbox that the menu would have.
+ */
+function cloneHtml() {
+  return `<div class="field wide" style="margin-top:6px">
+      <label>Clone a voice from an audio file</label>
+      <div class="addrow">
+        <input id="clone-path" placeholder="/home/you/voice.wav" style="flex:1">
+        <button class="small" id="clone-go">Upload</button>
+      </div>
+      <div class="help">A clean 10–30s clip of one person talking, no music. Uploads to the
+        Chatterbox server and switches Voice mode to <b>clone</b>. Needs Chatterbox running.</div>
+    </div>`;
+}
+
+function wireClone() {
+  const button = $("clone-go"), input = $("clone-path");
+  if (!button) return;
+  button.addEventListener("click", async () => {
+    if (!input.value.trim()) return;
+    button.disabled = true;
+    button.textContent = "Uploading…";
+    const result = await postJSON("/api/voice/clone", { path: input.value.trim() });
+    toast(result.message, !result.ok);
+    button.disabled = false;
+    button.textContent = "Upload";
+    if (result.ok) { input.value = ""; settingsDrawn = false; loadSettings(); }
+  });
+}
+
+function wireVoiceTester() {
+  const normal = $("vt-normal"), urgent = $("vt-urgent"), chatterbox = $("vt-chatterbox");
+  if (!normal) return;
+  normal.addEventListener("click", () => speakTest(false, normal));
+  urgent.addEventListener("click", () => speakTest(true, urgent));
+  chatterbox.addEventListener("click", async () => {
+    chatterbox.disabled = true;
+    chatterbox.textContent = "Starting…";
+    const result = await postJSON("/api/control", { action: "chatterbox" });
+    toast(result.message, !result.ok);
+    chatterbox.disabled = false;
+    chatterbox.textContent = "Start Chatterbox now";
+  });
+}
+
+function renderSettings(groups) {
+  $("settings").innerHTML = groups.map(group => `
+    <section class="sgroup">
+      <h2>${esc(group.group)}</h2>
+      <div class="sgrid">
+        ${group.fields.map(field => fieldHtml(field)).join("")}
+        ${group.group === "Voice" ? voiceTesterHtml() : ""}
+        ${group.group === "Chatterbox" ? cloneHtml() : ""}
+      </div>
+    </section>
+  `).join("");
+
+  wireVoiceTester();
+  wireClone();
   $("settings").querySelectorAll("[data-options]").forEach(select => loadOptions(select));
 
   const detect = $("settings").querySelector("[data-detect]");
@@ -682,7 +968,10 @@ function fieldHtml(field) {
   }
   const unit = field.unit ? ` <span class="muted">(${field.unit})</span>` : "";
   const slot = help || (field.type === "options" ? '<div class="help"></div>' : "");
-  return `<div class="field"><label for="${id}">${esc(field.label)}${unit}</label>${control}${slot}</div>`;
+  // A prompt box and a folder picker with a Detect list under it are unusable squeezed into one
+  // column of the grid, so they take the full width instead.
+  const wide = (field.type === "textarea" || field.type === "path") ? " wide" : "";
+  return `<div class="field${wide}"><label for="${id}">${esc(field.label)}${unit}</label>${control}${slot}</div>`;
 }
 
 async function saveSetting(key, newValue) {
@@ -730,6 +1019,8 @@ async function tick() {
     $("feed").innerHTML = renderFeed(bot.events);
     $("replies").innerHTML = renderReplies(bot.replies);
     renderSpeech(bot.speech);
+    // Cards have just changed height; layout() decides for itself whether that is worth a redeal.
+    layout(false);
   } catch (e) {
     $("dot-bot").className = "dot off";
     $("bot-uptime").textContent = "disconnected";
@@ -768,11 +1059,141 @@ $("add-key").addEventListener("click", async () => {
   loadKeys(true);
 });
 
+/* ---- masonry -------------------------------------------------------------
+ *
+ * Cards are dealt into whichever column is shortest, which is what CSS multi-column would not
+ * do (see the note by `main` in the stylesheet).
+ *
+ * Redealing on every 2s tick would make cards jump around as numbers grow, so a redeal happens
+ * only when the column count changes or the columns have drifted badly out of balance. That
+ * keeps the page still while it is being watched.
+ */
+const MIN_COL = 380, COL_GAP = 16, UNEVEN_RATIO = 1.4, UNEVEN_MIN_PX = 220;
+let cardOrder = null;
+
+function columnCount(main) {
+  const style = getComputedStyle(main);
+  const inner = main.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  const fits = Math.floor((inner + COL_GAP) / (MIN_COL + COL_GAP));
+  return Math.max(1, Math.min(cardOrder.length, fits || 1));
+}
+
+function unbalanced(columns) {
+  if (columns.length < 2) return false;
+  const heights = columns.map(c => c.offsetHeight);
+  const high = Math.max(...heights), low = Math.min(...heights);
+  return high - low > UNEVEN_MIN_PX && high > low * UNEVEN_RATIO;
+}
+
+function layout(force) {
+  const main = document.querySelector("main");
+  if (!main || main.hidden) return;
+  // Captured once, before any shuffling, so the reading order never depends on where the cards
+  // happen to be sitting now.
+  if (!cardOrder) cardOrder = Array.from(main.querySelectorAll(".card"));
+
+  const want = columnCount(main);
+  let columns = Array.from(main.querySelectorAll(":scope > .col"));
+  if (!force && columns.length === want && !unbalanced(columns)) return;
+
+  columns = [];
+  main.textContent = "";
+  for (let i = 0; i < want; i++) {
+    const column = document.createElement("div");
+    column.className = "col";
+    main.appendChild(column);
+    columns.push(column);
+  }
+  // Measured after each insertion rather than summed up front: a card's height depends on the
+  // width it lands in, and on its content, which changes every tick.
+  for (const card of cardOrder) {
+    let shortest = columns[0];
+    for (const column of columns) {
+      if (column.offsetHeight < shortest.offsetHeight) shortest = column;
+    }
+    shortest.appendChild(card);
+  }
+}
+
+let layoutTimer = null;
+addEventListener("resize", () => {
+  clearTimeout(layoutTimer);
+  layoutTimer = setTimeout(() => layout(true), 120);
+});
+
+/* ---- navigation ---------------------------------------------------------- */
+function showSettings(on) {
+  document.querySelector("main").hidden = on;
+  $("page-settings").hidden = !on;
+  location.hash = on ? "#settings" : "";
+  if (on) loadSettings();
+  else layout(true);   // the dashboard was display:none, so every card measured 0
+}
+$("nav-settings").addEventListener("click", () => showSettings(true));
+$("back-dash").addEventListener("click", () => showSettings(false));
+addEventListener("hashchange", () => showSettings(location.hash === "#settings"));
+
+/* ---- start and stop ------------------------------------------------------ */
+function renderControl(control) {
+  if (!control) return '<p class="empty">Loading…</p>';
+  const running = control.watching;
+  const blocked = control.blocking_reason;
+
+  let html = `<div class="runstate">
+      <span class="dot ${running ? "on" : "off"}"></span>
+      <b>${running ? "Watching Minecraft" : "Not watching"}</b>
+      ${running && control.uptime ? `<span class="muted">${duration(control.uptime)}</span>` : ""}
+    </div>
+    <div class="actions">
+      <button id="btn-start" class="primary" ${running || blocked ? "disabled" : ""}>Start</button>
+      <button id="btn-stop" ${running ? "" : "disabled"}>Stop</button>
+      <button id="btn-quit" class="danger">Quit the bot</button>
+    </div>`;
+
+  // The console printed these as warnings on startup; on the page they are the reason the
+  // Start button is greyed out, which is more useful than a disabled button with no cause.
+  if (blocked) html += `<div class="runline bad">${esc(blocked)}</div>`;
+  if (control.log_directory)
+    html += `<div class="runline">Watching <b>${esc(control.log_directory)}</b>${
+      control.log_exists ? "" : " — that folder does not exist"}</div>`;
+  else
+    html += `<div class="runline bad">No Minecraft folder set — pick one in Settings.</div>`;
+  if (control.audio === false)
+    html += `<div class="runline bad">No audio player found — install ffmpeg, mpv or mpg123.</div>`;
+  return html;
+}
+
+async function control(action) {
+  const result = await postJSON("/api/control", { action });
+  toast(result.message, !result.ok);
+  await loadControl();
+  return result.ok;
+}
+
+async function loadControl() {
+  try {
+    const data = await getJSON("/api/control");
+    $("control").innerHTML = renderControl(data);
+    const start = $("btn-start"), stop = $("btn-stop"), quit = $("btn-quit");
+    if (start) start.addEventListener("click", () => control("start"));
+    if (stop) stop.addEventListener("click", () => control("stop"));
+    if (quit) quit.addEventListener("click", async () => {
+      if (!confirm("Stop the bot completely? The dashboard will go offline.")) return;
+      await control("quit");
+    });
+  } catch (e) {
+    $("control").innerHTML = '<p class="empty">Could not reach the bot.</p>';
+  }
+}
+
 tick();
+loadControl();
 loadKeys(false);
-loadSettings();
+layout(true);
 setInterval(tick, 2000);
+setInterval(loadControl, 2000);
 setInterval(() => loadKeys(false), 90000);
+if (location.hash === "#settings") showSettings(true);
 </script>
 </body>
 </html>

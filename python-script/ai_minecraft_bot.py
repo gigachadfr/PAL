@@ -2448,6 +2448,12 @@ class App:
         self.state = PlayerState(self.config.get("LOG_DIRECTORY"))
         self.options = VoiceOptions(self.config)
         self.dashboard = None
+        # Watching used to be a blocking loop in the main thread that only Ctrl+C could end,
+        # which is why starting the bot was console-only. It now runs on its own thread and
+        # ends on an Event, so the menu and the dashboard drive it through the same two calls.
+        self._watcher = None
+        self._stop = threading.Event()
+        self._quit = threading.Event()
 
     def run(self):
         print("=" * 60)
@@ -2489,7 +2495,7 @@ class App:
             return
         dashboard = Dashboard(
             self.config, self.telemetry, self.state,
-            options=self.options, finder=MinecraftFinder,
+            options=self.options, finder=MinecraftFinder, controller=self,
             host=self.config.get("DASHBOARD_HOST"),
             port=self.config.get_int("DASHBOARD_PORT"),
         )
@@ -2512,13 +2518,102 @@ class App:
             self.launcher.stop()
             self.launcher = None
 
+    # ---- what the dashboard is allowed to ask for ---------------------------
+
+    def start_chatterbox(self):
+        """Menu option 2 -> 6 ("start it now"), as a single call the page can make."""
+        if self.launcher:
+            return False, "Chatterbox is already being managed by the bot."
+        launcher = ChatterboxLauncher(self.config)
+        if not launcher.enabled():
+            return False, "Set the Chatterbox server folder first."
+        if TTS(self.config)._chatterbox_available():
+            return False, "Chatterbox is already running."
+        if launcher.start():
+            self.launcher = launcher
+            return True, "Chatterbox is up."
+        return False, "Chatterbox would not start — check the server folder."
+
+    # Two lines that differ only in delivery, so the urgent boost can actually be judged — the
+    # same pair the console's preview speaks.
+    TEST_LINES = {
+        False: "Twenty-one whole seconds to mine some grey rocks. Riveting.",
+        True: "A creeper! Behind you! Move, you absolute walnut!",
+    }
+
+    def synthesize_test(self, urgent=False):
+        """
+        One spoken line for the dashboard's voice tester.
+
+        Returns (audio, engine, problem). The engine that answered is returned rather than the
+        one configured, because `auto` falls back quietly and knowing Edge spoke when you asked
+        for Chatterbox is the point of testing.
+        """
+        try:
+            tts = TTS(self.config)
+            engine, audio = tts._synthesize(self.TEST_LINES[bool(urgent)], urgent=bool(urgent))
+        except Exception as e:
+            return None, "", f"The voice failed: {e}"
+        if not audio:
+            return None, "", "No engine produced any audio. Check the keys and the server."
+        return audio, engine, ""
+
+    def clone_voice(self, file_path):
+        """
+        Menu option 2 -> 4, as one call.
+
+        Takes a path on this machine rather than a browser upload because the dashboard is
+        loopback-only by design — the file is already on the same disk, and the console flow
+        asks for exactly the same thing.
+        """
+        path = (file_path or "").strip().strip("'\"")
+        if not path:
+            return False, "No file given."
+        tts = TTS(self.config)
+        if not tts._chatterbox_available():
+            return False, "Chatterbox is not running."
+        uploaded = tts.upload_reference(path)
+        if not uploaded:
+            return False, "That file could not be uploaded — it must be an existing .wav or .mp3."
+        self.config.set("CHATTERBOX_MODE", "clone")
+        self.config.set("CHATTERBOX_VOICE", uploaded)
+        return True, f"Now cloning from {uploaded}."
+
+    def quit_app(self):
+        """
+        Ends the program from the page.
+
+        The menu is parked in a blocking `input()` that nothing can interrupt from another
+        thread, so a clean shutdown runs here and the process is then ended outright. It is
+        deferred by a moment so this request can still be answered first.
+        """
+        def shutdown():
+            time.sleep(0.4)
+            self.stop_watching(timeout=3.0)
+            self._shutdown_server()
+            if self.dashboard:
+                self.dashboard.stop()
+            print("\n[QUIT] Stopped from the dashboard.")
+            os._exit(0)
+
+        self._quit.set()
+        threading.Thread(target=shutdown, name="quit", daemon=True).start()
+        return True, "Shutting down."
+
     def _menu_loop(self):
         while True:
-            print("\n1. Start   2. Voice   3. API keys   4. Settings   5. Quit"
+            # The dashboard can start and stop watching too, so the menu reports the real state
+            # rather than assuming the console is the only thing driving it.
+            first = "Stop" if self.is_watching() else "Start"
+            print(f"\n1. {first}   2. Voice   3. API keys   4. Settings   5. Quit"
                   + ("   6. Dashboard" if self.dashboard else ""))
             choice = input("> ").strip()
             if choice == "1":
-                self.start()
+                if self.is_watching():
+                    ok, message = self.stop_watching()
+                    print(f"[STOP] {message}")
+                else:
+                    self.start()
             elif choice == "2":
                 self.wizard.voice_setup()
             elif choice == "3":
@@ -2532,15 +2627,63 @@ class App:
                 print(f"[DASH] {self.dashboard.url}")
                 webbrowser.open(self.dashboard.url)
 
+    # ---- watching, driven by the menu and by the dashboard alike -------------
+
+    def is_watching(self):
+        return bool(self._watcher and self._watcher.is_alive())
+
+    def blocking_reason(self):
+        """Why Start would not work, in one sentence, or None. The page greys the button out."""
+        directory = self.config.get("LOG_DIRECTORY")
+        if not directory:
+            return "No Minecraft folder is set."
+        if not Path(directory).is_dir():
+            return f"{directory} does not exist."
+        if not self.config.get("GEMINI_API_KEY"):
+            return "No Gemini API key is set."
+        return None
+
+    def start_watching(self):
+        """Starts the watch thread. Returns (ok, message); never blocks."""
+        if self.is_watching():
+            return False, "Already watching."
+        reason = self.blocking_reason()
+        if reason:
+            return False, reason
+
+        self._stop.clear()
+        self._watcher = threading.Thread(target=self._watch, name="watcher", daemon=True)
+        self._watcher.start()
+        return True, "Watching."
+
+    def stop_watching(self, timeout=6.0):
+        if not self.is_watching():
+            return False, "Not watching."
+        self._stop.set()
+        self._watcher.join(timeout=timeout)
+        # A thread still alive here is stuck in a request that will end on its own; it is a
+        # daemon and the stop flag is set, so it cannot outlive the process or speak again.
+        return True, "Stopped." if not self.is_watching() else "Stopping…"
+
     def start(self):
+        """Menu option 1: start, then hold the console until Ctrl+C, as it always did."""
+        ok, message = self.start_watching()
+        print(f"[START] {message}" if ok else f"[WARN] {message}")
+        if not ok:
+            return
+        print("Press Ctrl+C to stop watching.\n")
+        try:
+            while self.is_watching():
+                time.sleep(0.3)
+        except KeyboardInterrupt:
+            self.stop_watching()
+            print("\n[STOP] Stopped.")
+
+    def _watch(self):
         player = AudioPlayer()
         if not player.available() and platform.system() != "Windows":
             print("[WARN] No audio player found — install ffplay (ffmpeg), mpv or mpg123.")
 
-        # The server's lifetime is the program's, not this run's — see _ensure_server.
-        self._run(player)
-
-    def _run(self, player):
         state = self.state
         ai = AIHandler(self.config, player, history=ChatHistory.choose(), state=state,
                        telemetry=self.telemetry)
@@ -2551,31 +2694,38 @@ class App:
         if found:
             tailer.attach(found)
         else:
-            tailer.wait_for_log()
+            # Waiting for the log used to block until it appeared; now a Stop from the page has
+            # to be able to cut that short, so it is polled against the same flag.
+            while not self._stop.is_set():
+                found = tailer.find_log()
+                if found:
+                    tailer.attach(found)
+                    break
+                self._stop.wait(2.0)
+            if self._stop.is_set():
+                return
 
         interval = self.config.get_float("CHECK_INTERVAL")
         print("\n[START] Watching. CRITICAL events interrupt, NOTABLE groups, INFO waits.")
         if self.dashboard:
             print(f"[DASH] Follow along at {self.dashboard.url}")
-        print("Press Ctrl+C to stop.\n")
 
         if self.telemetry:
             self.telemetry.session_started()
         try:
-            while True:
+            while not self._stop.is_set():
                 events = tailer.poll()
                 if events:
                     for event in events:
                         print(f"  · {event.get('lvl','?'):8} {event.get('msg','')}")
                     commentator.ingest(events)
                 commentator.maybe_flush()
-                time.sleep(interval)
-        except KeyboardInterrupt:
-            print("\n[STOP] Stopped.")
+                # wait() rather than sleep() so a Stop is acted on immediately instead of after
+                # a full poll interval.
+                self._stop.wait(interval)
         finally:
             if self.telemetry:
                 self.telemetry.session_stopped()
-            # Save even on Ctrl+C, which is how a session normally ends.
             ChatHistory.save(ai.history)
 
 

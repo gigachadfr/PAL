@@ -204,7 +204,15 @@ A local web dashboard starts with the bot and prints its address:
 [DASH] Dashboard at http://127.0.0.1:8765
 ```
 
-Menu option **6** reopens it. It shows, refreshed every two seconds:
+![The dashboard](../screen/dashboard.png)
+
+Menu option **6** reopens it. Anything the console menu can do, the page can do too — the
+terminal is somewhere to watch the log scroll past, not something you have to drive. It shows,
+refreshed every two seconds:
+
+- **Commentator** — the first card: **Start** and **Stop** watching, and **Quit the bot**. When
+  Start is unavailable the card says why (no folder set, no Gemini key, the folder has gone) in
+  place of a greyed-out button with no explanation
 
 - **The player right now** — health, hunger and armour as gauges, XP, status effects,
   what they are doing, where they are
@@ -214,21 +222,75 @@ Menu option **6** reopens it. It shows, refreshed every two seconds:
   Chatterbox carrying the load and Edge taking over when it does
 - **Deaths** — the count, what killed them, the breakdown by cause, the most recent ones
 - **Progress** — kills by creature, blocks mined, distance walked, hours played
-- **Inventory and equipment**, with durability, red when a tool is about to break
+- **Inventory and equipment**, as a grid of real item icons, with durability and red when a
+  tool is about to break
 - **The live event feed**, colour-coded by priority, and what the commentator actually said,
   with its latency and which lookups it used
 - **Gemini usage** against the free tier: requests this minute and today, how many were
   refused for quota, and how long ago. A reply that uses a lookup costs two requests, and the
   gauge counts both — which is what a 429 is actually reacting to
-- **Every setting**, editable in place — including the Chatterbox emotion sliders, which is a
-  far better way to tune them than editing `.env` between runs, and dropdowns for the three
-  voice settings rather than an id to type from memory
+![The settings page](../screen/dashboard-settings.png)
+
+**Settings** is a page of its own, reached from the button in the top bar. It was a card, but a
+900px column set the masonry's floor and shoved everything else around, and it is the one part
+of this you read rather than watch. It holds every setting, editable in place — the Chatterbox
+emotion sliders, which is a far better way to tune them than editing `.env` between runs, and
+dropdowns for the voice settings rather than an id typed from memory — plus the two things that
+used to need the console:
+
+- **Test the voice** — speaks a routine line and a critical one, the same pair the menu's
+  preview uses, so the urgent boost can actually be judged. The audio comes back over HTTP and
+  plays in the browser, which works whichever engine answered — and the page names the engine
+  that *did* answer, since `auto` falls back quietly and being told Edge spoke when you asked
+  for Chatterbox is the entire point of a test button. **Start Chatterbox now** is next to it.
+- **Clone a voice** — takes the path of a `.wav`/`.mp3` on this machine, uploads it to the
+  Chatterbox server and switches Voice mode to `clone`. A path rather than a file picker
+  because the dashboard only ever answers loopback, so the clip is already on the same disk.
 
 Cards are laid out as masonry rather than a grid: a grid row is as tall as its tallest card,
 and with cards this uneven half the page was empty.
 
+That masonry is now built in JavaScript, dealing each card into whichever column is shortest.
+The obvious CSS answer — `column-width` — turned out to be wrong: multi-column *balances*, so it
+picks a column count from the width and then makes every column the same height. Since
+`break-inside: avoid` stops a column being shorter than the tallest card, one 900px card set the
+floor for all of them, three columns already reached it, and every column after that stayed
+empty. On a 2500px screen the page used about half its width. Cards are redealt when the window
+resizes or the columns drift badly out of balance, but not on every tick, so nothing jumps
+around while you are reading it.
+
 It runs on the standard library's `http.server`; there is no fifth dependency and no CDN, so it
 works with no internet beyond the ElevenLabs quota check. The charts are hand-drawn SVG.
+
+### Where the item icons come from
+
+Nothing is downloaded and nothing is bundled. `icons.py` reads the textures straight out of the
+jars already on the machine: Minecraft's own jar for vanilla items, and every jar in the
+instance's `mods/` folder for the rest — so Create, Farmer's Delight and anything installed
+later work with no list of "supported mods" to maintain. Reading 50-odd jars costs about half a
+second at startup, because only each jar's file list is read; a texture is unpacked the first
+time something asks for it.
+
+Three details the jars force:
+
+- **Blocks have no item texture.** `cobblestone` lives in `textures/block/`, and its real
+  inventory icon is a 3D render of the block model. Rendering models is out of scope, so a block
+  falls back to its most recognisable face — a furnace shows its front, not its blank grey top.
+- **Animated textures are film strips.** `water_still.png` is 16x512: thirty-two stacked frames.
+  Icons are drawn as a CSS `background-image` sized `100% auto`, which shows the top frame only,
+  so no image library is needed and still textures are unaffected.
+- **A handful of names do not line up.** `magma_block`'s texture is `magma.png`, and a shield has
+  no item texture at all. Anything unresolved shows its first two letters instead of a blank
+  square, with the full name on hover.
+
+Icons are served from `/icon/<kind>/<name>.png`, and only paths that are already in the index are
+served, so the route cannot be walked out of the jars.
+
+The page declares `color-scheme: dark`. Without it, a browser with "force dark mode" turned on —
+Opera's setting of that name, Chrome's auto dark — treats this page as a light one to invert. The
+dark background survives that, but the icons do not: they are PNGs, and the inversion filter
+turned cobblestone pink and blanked half the grid. Declaring the scheme is the supported way to
+opt out, and it fixes it for every visitor rather than asking each of them to change a setting.
 
 **It binds to `127.0.0.1`.** The settings endpoint reads and writes `.env`, which holds your API
 keys, so the server refuses any request that does not come from this machine — even if you point
@@ -246,6 +308,22 @@ while the bot was plainly synthesising, so the card shows what ElevenLabs report
 this bot has actually sent through that key, tracked per key in `elevenlabs_keys.json`. When
 the two disagree the card says so rather than picking one. A reset date in the past — which is
 what an idle free account reports — shows as "stale" instead of a negative countdown.
+
+**A key that cannot read its own quota is not a broken key.** ElevenLabs added per-key
+permissions, and a key scoped to speech only is refused by `/v1/user/subscription` with a 401
+while still synthesising perfectly. That 401 used to be reported as "the key was refused — it
+may have been revoked", which sent you looking for a dead key that was fine: six of seven keys
+on the machine this was written on were being libelled that way. The card now separates the two
+by reading the error body — `status: missing_permissions` — and labels such a key **no quota
+access** rather than rejected.
+
+For those keys the usage still comes through, from `/v1/usage/character-stats`, which answers
+under a different permission. It was checked against a key that *does* have `user_read` and the
+two agreed exactly, so it is the same number by another route. What it cannot give is the
+allowance or the reset date, and its window is a rolling 30 days rather than the billing cycle
+— so it is labelled an estimate with the allowance marked unknown, instead of being drawn as a
+gauge that would be quietly wrong. Ticking **User: Read** on the key at elevenlabs.io restores
+the full figure, and the card says so once rather than under every affected key.
 
 ### Voice pickers
 

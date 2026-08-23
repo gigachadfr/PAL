@@ -20,10 +20,18 @@ from pathlib import Path
 
 import requests
 
+from icons import IconLibrary, readable_to_path
+
 PAGE_FILE = "dashboard.html"
+# Textures come out of jars that never change while the game is closed, so the browser may keep
+# them as long as it likes. Everything else on this page is deliberately no-store.
+ICON_CACHE_S = 86400
 # ElevenLabs quotas move slowly and every check is a network round trip.
 QUOTA_CACHE_S = 90
 QUOTA_TIMEOUT_S = 8
+# Rolling window for keys that can only report usage, never their allowance. Not the billing
+# cycle — which is exactly why what it produces is labelled an estimate.
+USAGE_WINDOW_DAYS = 30
 # Nothing is served from these unless the request came from the machine running the bot.
 LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
@@ -289,6 +297,65 @@ class KeyQuotas:
             return list(pool.map(
                 lambda pair: self._one(pair[0], pair[1], counts, chars, active), enumerate(keys)))
 
+    @staticmethod
+    def _missing_permission(response):
+        """
+        True when a 401 means "this key is not allowed to do that", not "this key is bad".
+
+        ElevenLabs answers `{"detail": {"status": "missing_permissions", ...}}`. Anything we
+        cannot parse is treated as a genuine rejection, which is the safer way round: claiming a
+        dead key is merely under-scoped would hide a real problem.
+        """
+        try:
+            detail = response.json().get("detail") or {}
+        except ValueError:
+            return False
+        if not isinstance(detail, dict):
+            return False
+        return (detail.get("status") == "missing_permissions"
+                or "user_read" in str(detail.get("message", "")))
+
+    def _without_user_read(self, entry, key):
+        """
+        Usage for a key that cannot read its own account.
+
+        `/v1/usage/character-stats` needs a different permission and answers for these keys — it
+        was checked against a key that *does* have `user_read` and the two agreed exactly, so it
+        is the same number by another route. What it cannot give is the allowance or the reset
+        date, and the window is a rolling 30 days rather than the billing cycle, so the result
+        is labelled an estimate rather than dressed up as the real quota.
+        """
+        entry["status"] = "limited"
+        entry["detail"] = ("This key cannot read the account's quota — it is missing the "
+                           "user_read permission. Speech still works.")
+        entry["fix"] = ("Edit the key at elevenlabs.io → Profile → API Keys and tick "
+                        "\"User: Read\" to see the real allowance here.")
+        now = int(time.time() * 1000)
+        try:
+            response = requests.get(
+                "https://api.elevenlabs.io/v1/usage/character-stats",
+                headers={"xi-api-key": key},
+                params={"start_unix": now - USAGE_WINDOW_DAYS * 86400 * 1000, "end_unix": now},
+                timeout=QUOTA_TIMEOUT_S,
+            )
+            if response.status_code != 200:
+                return entry
+            usage = (response.json() or {}).get("usage") or {}
+        except (requests.RequestException, ValueError):
+            return entry
+
+        # One series per voice on some accounts, a single "All" on others; summing covers both.
+        total = 0
+        for series in usage.values():
+            if isinstance(series, list):
+                total += sum(value for value in series if isinstance(value, (int, float)))
+        entry.update({
+            "used": int(total),
+            "used_is_estimate": True,
+            "window_days": USAGE_WINDOW_DAYS,
+        })
+        return entry
+
     def _one(self, index, key, counts, chars, active):
         entry = {
             "index": index + 1,
@@ -313,6 +380,12 @@ class KeyQuotas:
             return entry
 
         if response.status_code == 401:
+            # A 401 here has two very different causes and they used to be reported as one.
+            # ElevenLabs added per-key permissions: a key scoped to text-to-speech only is
+            # refused by /user/subscription while still working perfectly for speech. Calling
+            # that "revoked" sent people hunting for a problem that was not there.
+            if self._missing_permission(response):
+                return self._without_user_read(entry, key)
             entry["status"] = "rejected"
             entry["detail"] = "The key was refused — it may have been revoked."
             return entry
@@ -362,16 +435,21 @@ class KeyQuotas:
 class Dashboard:
     """The HTTP server and everything it needs to answer with."""
 
-    def __init__(self, config, telemetry, state, options=None, finder=None,
+    def __init__(self, config, telemetry, state, options=None, finder=None, controller=None,
                  host="127.0.0.1", port=8765):
         self.config = config
         self.telemetry = telemetry
         self.state = state
         self.options = options
         self.finder = finder
+        # The App itself. Everything the console menu can do is reachable through it, so the
+        # page is not a read-only view of a program you still have to drive from a terminal.
+        self.controller = controller
         self.host = host
         self.port = port
         self.quotas = KeyQuotas(config)
+        self.icons = IconLibrary(
+            IconLibrary.game_dir_from_log_directory(config.get("LOG_DIRECTORY")))
         self.server = None
         self.thread = None
         self.page = Path(__file__).with_name(PAGE_FILE)
@@ -406,6 +484,7 @@ class Dashboard:
 
     def snapshot(self):
         player = self.state.read() if self.state else None
+        self._attach_icons(player)
         return {
             "now": datetime.now().strftime("%H:%M:%S"),
             "bot": self.telemetry.snapshot(),
@@ -420,6 +499,128 @@ class Dashboard:
                 "rpd_limit": self.config.get_int("GEMINI_RPD_LIMIT"),
             },
         }
+
+    # ---- running the commentator -------------------------------------------
+
+    def control_state(self):
+        """Everything the Commentator card shows, including why Start may be unavailable."""
+        controller = self.controller
+        directory = self.config.get("LOG_DIRECTORY")
+        state = {
+            "available": bool(controller),
+            "watching": bool(controller and controller.is_watching()),
+            "log_directory": directory,
+            "log_exists": bool(directory and Path(directory).is_dir()),
+        }
+        if not controller:
+            # Running dashboard.py without the bot around it — the page still renders.
+            state["blocking_reason"] = "The bot is not attached to this dashboard."
+            return state
+
+        state["blocking_reason"] = controller.blocking_reason()
+        if self.telemetry:
+            snapshot = self.telemetry.snapshot()
+            state["uptime"] = snapshot.get("run_seconds")
+        return state
+
+    def _ask(self, method, *args):
+        """
+        Calls one of the controller's actions, refusing rather than raising when it is missing.
+
+        An AttributeError inside a handler kills the request with no reply at all, which looks
+        to the page like the bot died. An older bot, or a partial stand-in, should get a plain
+        "cannot do that" instead.
+        """
+        if not self.controller:
+            return False, "The bot is not attached to this dashboard."
+        action = getattr(self.controller, method, None)
+        if not callable(action):
+            return False, f"This version of the bot cannot do that ({method})."
+        try:
+            return action(*args)
+        except Exception as e:
+            return False, f"That failed: {e}"
+
+    def control(self, action):
+        methods = {"start": "start_watching", "stop": "stop_watching",
+                   "chatterbox": "start_chatterbox", "quit": "quit_app"}
+        if action not in methods:
+            return False, f"Unknown action {action}."
+        return self._ask(methods[action])
+
+    def clone_voice(self, path):
+        return self._ask("clone_voice", path)
+
+    # ---- voice test --------------------------------------------------------
+
+    @staticmethod
+    def _audio_type(audio):
+        """MP3 from Edge and ElevenLabs, WAV from Chatterbox; sniffed rather than assumed."""
+        if audio[:4] == b"RIFF":
+            return "audio/wav"
+        if audio[:4] == b"OggS":
+            return "audio/ogg"
+        return "audio/mpeg"
+
+    def voice_test(self, urgent=False):
+        """
+        Synthesises one line and hands the bytes back for the browser to play.
+
+        The synthesis itself belongs to the bot — importing TTS here would be a circular import,
+        since the bot imports this module. Returns (audio, type, engine, requested) on success
+        and (None, message, "", requested) on failure.
+        """
+        requested = self.config.get("TTS_BACKEND")
+        if not self.controller:
+            return None, "The bot is not attached to this dashboard.", "", requested
+        audio, engine, problem = self.controller.synthesize_test(bool(urgent))
+        if not audio:
+            return None, problem, "", requested
+        return audio, self._audio_type(audio), engine, requested
+
+    # ---- icons -------------------------------------------------------------
+
+    @staticmethod
+    def _item_name(described):
+        """
+        "3x Diamond Pickaxe (312/1561 durability left)" -> "Diamond Pickaxe".
+
+        Equipment slots arrive as the sentence the mod built for the commentator, so the count
+        prefix and the durability tail both have to come off before the name can be looked up.
+        """
+        name = (described or "").split("(")[0].strip()
+        if "x " in name[:5]:
+            head, _, tail = name.partition("x ")
+            if head.isdigit():
+                name = tail.strip()
+        return name
+
+    def _attach_icons(self, player):
+        """
+        Tags every inventory item and equipment slot with the texture that represents it.
+
+        Done here rather than in the page because the server already has the snapshot: the icons
+        cannot drift out of step with the counts, and an unknown item simply has no `icon` key
+        and falls back to a lettered tile.
+        """
+        if not player:
+            return
+        inventory = player.get("inventory") or {}
+        for item in inventory.get("items") or []:
+            key = self.icons.resolve(readable_to_path(item.get("name")))
+            if key:
+                item["icon"] = key
+
+        equipment = player.get("equipment") or {}
+        icons = {}
+        for slot, described in equipment.items():
+            if not isinstance(described, str) or described == "nothing":
+                continue
+            key = self.icons.resolve(readable_to_path(self._item_name(described)))
+            if key:
+                icons[slot] = key
+        if icons:
+            player["equipment_icons"] = icons
 
     def settings(self):
         groups = []
@@ -457,6 +658,8 @@ class Dashboard:
         self.config.set("LOG_DIRECTORY", path)
         if self.state:
             self.state.retarget(path)
+        # Another instance means another set of mods, so the texture index has to be rebuilt.
+        self.icons.retarget(IconLibrary.game_dir_from_log_directory(path))
         if not Path(path).is_dir():
             # Saved anyway: the mod creates the folder the first time you join a world, so a
             # path that does not exist yet is a normal thing to configure ahead of time.
@@ -510,15 +713,29 @@ class Dashboard:
                 self._send(403, {"error": "The dashboard only answers local requests."})
                 return False
 
-            def _send(self, code, payload, content_type="application/json"):
+            def _send(self, code, payload, content_type="application/json", cache_s=0):
                 body = (json.dumps(payload).encode("utf-8")
                         if content_type == "application/json" else payload)
                 self.send_response(code)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("Cache-Control",
+                                 f"max-age={cache_s}" if cache_s else "no-store")
                 self.end_headers()
                 self.wfile.write(body)
+
+            def _send_icon(self, route):
+                # /icon/item/diamond_sword.png -> "item/diamond_sword". Only keys already in the
+                # index are served, so the path can never escape the jars.
+                key = route[len("/icon/"):]
+                if not key.endswith(".png"):
+                    self._send(404, {"error": "No such icon."})
+                    return
+                data = dashboard.icons.png(key[:-4])
+                if data is None:
+                    self._send(404, {"error": "No such icon."})
+                    return
+                self._send(200, data, "image/png", cache_s=ICON_CACHE_S)
 
             def do_GET(self):
                 if not self._local_only():
@@ -534,6 +751,12 @@ class Dashboard:
                     self._send(200, dashboard.settings())
                 elif route == "/api/detect":
                     self._send(200, dashboard.detect_log_directory())
+                elif route == "/api/control":
+                    self._send(200, dashboard.control_state())
+                elif route == "/api/icons":
+                    self._send(200, dashboard.icons.status())
+                elif route.startswith("/icon/"):
+                    self._send_icon(route)
                 elif route == "/api/options":
                     field = ""
                     if "field=" in self.path:
@@ -567,6 +790,27 @@ class Dashboard:
                     ok, message = dashboard.add_voice_option(
                         payload.get("field", ""), str(payload.get("value", "")))
                     self._send(200 if ok else 400, {"ok": ok, "message": message})
+                elif route == "/api/control":
+                    ok, message = dashboard.control(payload.get("action", ""))
+                    self._send(200 if ok else 400, {"ok": ok, "message": message})
+                elif route == "/api/voice/clone":
+                    ok, message = dashboard.clone_voice(str(payload.get("path", "")))
+                    self._send(200 if ok else 400, {"ok": ok, "message": message})
+                elif route == "/api/voice/test":
+                    audio, kind, engine, requested = dashboard.voice_test(payload.get("urgent"))
+                    if not audio:
+                        # `kind` carries the reason when there is no audio.
+                        self._send(400, {"error": kind})
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", kind)
+                    self.send_header("Content-Length", str(len(audio)))
+                    self.send_header("Cache-Control", "no-store")
+                    # Read by the page to say which engine actually spoke.
+                    self.send_header("X-Voice-Engine", engine)
+                    self.send_header("X-Voice-Requested", requested)
+                    self.end_headers()
+                    self.wfile.write(audio)
                 else:
                     self._send(404, {"error": "No such endpoint."})
 
