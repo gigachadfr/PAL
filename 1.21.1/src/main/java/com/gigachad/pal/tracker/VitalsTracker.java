@@ -4,10 +4,10 @@ import com.gigachad.pal.PlayerActionLogger;
 import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
 import com.gigachad.pal.util.Names;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.mob.HostileEntity;
-import net.minecraft.util.math.Box;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.phys.AABB;
 
 import java.util.List;
 
@@ -28,23 +28,31 @@ public class VitalsTracker implements Tracker {
     private float lastHealth = -1f;
     private int lastFood = -1;
     private int lastXpLevel = -1;
-    private float lastFallDistance = 0f;
+    private double lastFallDistance = 0.0;  // fallDistance is a double as of 26.1
     private float pendingDamage = 0f;
+    private static final long LEVEL_SETTLE_MS = 3_000L;
+    private int pendingLevel = 0;
+    private int reportedLevel = 0;
+    private long levelSettleAt = 0L;
     private boolean lowHealthFlagged = false;
     private boolean starvingFlagged = false;
+    private boolean dippedBelowHalf = false;
 
     @Override
-    public void onSessionStart(ClientPlayerEntity player, EventLog log) {
+    public void onSessionStart(LocalPlayer player, EventLog log) {
         lastHealth = -1f;
         lastFood = -1;
         lastXpLevel = -1;
-        lastFallDistance = 0f;
+        pendingLevel = 0;
+        reportedLevel = 0;
+        lastFallDistance = 0.0;
         lowHealthFlagged = false;
         starvingFlagged = false;
+        dippedBelowHalf = false;
     }
 
     @Override
-    public void tick(ClientPlayerEntity player, EventLog log, long tick) {
+    public void tick(LocalPlayer player, EventLog log, long tick) {
         if (player.isSpectator() || player.isCreative()) {
             lastHealth = player.getHealth();
             return;
@@ -52,7 +60,7 @@ public class VitalsTracker implements Tracker {
 
         float health = player.getHealth();
         float maxHealth = player.getMaxHealth();
-        int food = player.getHungerManager().getFoodLevel();
+        int food = player.getFoodData().getFoodLevel();
         int xp = player.experienceLevel;
 
         // ---- damage taken -------------------------------------------------
@@ -90,6 +98,17 @@ public class VitalsTracker implements Tracker {
             lowHealthFlagged = false;
         }
 
+        // ---- recovery -----------------------------------------------------
+        // Damage is logged, healing never was, so the log's last word on the player's health
+        // stayed "took 6 damage, 8 left" for the rest of the session. Announced once per dip,
+        // which costs one line per fight at most.
+        if (health >= maxHealth && dippedBelowHalf) {
+            dippedBelowHalf = false;
+            log.log(Level.INFO, "recovered", "Back to full health.");
+        } else if (health < maxHealth * 0.5f) {
+            dippedBelowHalf = true;
+        }
+
         // ---- hunger -------------------------------------------------------
         if (food <= 3 && !starvingFlagged) {
             starvingFlagged = true;
@@ -100,14 +119,25 @@ public class VitalsTracker implements Tracker {
         }
 
         // ---- drowning -----------------------------------------------------
-        int air = player.getAir();
-        if (air <= 0 && player.isSubmergedInWater()) {
+        int air = player.getAirSupply();
+        if (air <= 0 && player.isUnderWater()) {
             log.logThrottled(Level.CRITICAL, "drowning", "Out of air and drowning.", 5_000L);
         }
 
         // ---- level up -----------------------------------------------------
-        if (lastXpLevel >= 0 && xp > lastXpLevel && xp % 5 == 0) {
-            log.log(Level.INFO, "level_up", String.format("Reached experience level %d.", xp));
+        // A dragon kill dumps thousands of XP at once and the level counter sweeps upward,
+        // which used to emit a line for every multiple of 5 it passed through. Wait for the
+        // climb to settle, then report where it landed.
+        if (lastXpLevel >= 0 && xp > lastXpLevel) {
+            pendingLevel = xp;
+            levelSettleAt = System.currentTimeMillis() + LEVEL_SETTLE_MS;
+        } else if (pendingLevel > 0 && System.currentTimeMillis() >= levelSettleAt) {
+            if (pendingLevel % 5 == 0 || pendingLevel - reportedLevel >= 5) {
+                log.log(Level.INFO, "level_up",
+                        String.format("Reached experience level %d.", pendingLevel));
+                reportedLevel = pendingLevel;
+            }
+            pendingLevel = 0;
         }
 
         lastHealth = health;
@@ -120,28 +150,28 @@ public class VitalsTracker implements Tracker {
      * Best-effort attribution of damage using only client-visible state. Order matters: the
      * environmental causes are unambiguous, so they win over the "a mob is nearby" guess.
      */
-    private String guessDamageSource(ClientPlayerEntity player) {
+    private String guessDamageSource(LocalPlayer player) {
         if (player.isInLava()) return "lava";
         if (player.isOnFire()) return "fire";
-        if (player.getAir() <= 0 && player.isSubmergedInWater()) return "drowning";
-        if (player.isInsideWall()) return "suffocation";
+        if (player.getAirSupply() <= 0 && player.isUnderWater()) return "drowning";
+        if (player.isInWall()) return "suffocation";
         if (lastFallDistance > 3.0f) return String.format("a %.0f block fall", lastFallDistance);
 
         Entity closest = closestHostile(player);
         return closest == null ? "an unknown source" : "a " + Names.readable(closest);
     }
 
-    private Entity closestHostile(ClientPlayerEntity player) {
+    private Entity closestHostile(LocalPlayer player) {
         // Wide enough to catch a skeleton shooting from across the room — the old 5 block box
         // left most ranged hits attributed to "an unknown source".
-        Box box = player.getBoundingBox().expand(16.0);
-        List<HostileEntity> mobs =
-                player.clientWorld.getEntitiesByClass(HostileEntity.class, box, e -> e.isAlive());
+        AABB box = player.getBoundingBox().inflate(16.0);
+        List<Monster> mobs =
+                player.level().getEntitiesOfClass(Monster.class, box, e -> e.isAlive());
 
         Entity closest = null;
         double best = Double.MAX_VALUE;
-        for (HostileEntity mob : mobs) {
-            double d = mob.squaredDistanceTo(player);
+        for (Monster mob : mobs) {
+            double d = mob.distanceToSqr(player);
             if (d < best) {
                 best = d;
                 closest = mob;

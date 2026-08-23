@@ -1,18 +1,18 @@
 package com.gigachad.pal.mixin;
 
 import com.gigachad.pal.PlayerActionLogger;
-import net.minecraft.block.BlockState;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.client.network.ClientPlayerInteractionManager;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.item.BlockItem;
-import net.minecraft.item.ItemStack;
-import net.minecraft.util.ActionResult;
-import net.minecraft.util.Hand;
-import net.minecraft.util.hit.BlockHitResult;
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.client.multiplayer.MultiPlayerGameMode;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.core.BlockPos;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
@@ -24,20 +24,20 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
  * The single entry point for the player's own world interactions. Working from the client
  * interaction manager (rather than server events) is what makes this work on remote servers.
  */
-@Mixin(ClientPlayerInteractionManager.class)
-public class ClientPlayerInteractionManagerMixin {
+@Mixin(MultiPlayerGameMode.class)
+public class MultiPlayerGameModeMixin {
 
     /** State captured at HEAD, since by RETURN the block is already gone. */
     @Unique
     private BlockState pal$brokenState;
 
-    @Inject(method = "breakBlock", at = @At("HEAD"))
+    @Inject(method = "destroyBlock", at = @At("HEAD"))
     private void pal$captureBlock(BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        pal$brokenState = client.world == null ? null : client.world.getBlockState(pos);
+        Minecraft client = Minecraft.getInstance();
+        pal$brokenState = client.level == null ? null : client.level.getBlockState(pos);
     }
 
-    @Inject(method = "breakBlock", at = @At("RETURN"))
+    @Inject(method = "destroyBlock", at = @At("RETURN"))
     private void pal$onBlockBroken(BlockPos pos, CallbackInfoReturnable<Boolean> cir) {
         if (cir.getReturnValue() && pal$brokenState != null && !pal$brokenState.isAir()) {
             PlayerActionLogger.onBlockBroken(pal$brokenState, pos);
@@ -45,8 +45,8 @@ public class ClientPlayerInteractionManagerMixin {
         pal$brokenState = null;
     }
 
-    @Inject(method = "attackEntity", at = @At("HEAD"))
-    private void pal$onAttack(PlayerEntity player, Entity target, CallbackInfo ci) {
+    @Inject(method = "attack", at = @At("HEAD"))
+    private void pal$onAttack(Player player, Entity target, CallbackInfo ci) {
         PlayerActionLogger.onAttack(target);
     }
 
@@ -56,20 +56,20 @@ public class ClientPlayerInteractionManagerMixin {
      * only knows what it asked for. The block identity is exact, and the position is exact in
      * every case except placement against a replaceable block.
      */
-    @Inject(method = "interactBlock", at = @At("RETURN"))
-    private void pal$onInteractBlock(ClientPlayerEntity player, Hand hand, BlockHitResult hitResult,
-                                     CallbackInfoReturnable<ActionResult> cir) {
-        if (!cir.getReturnValue().isAccepted()) return;
+    @Inject(method = "useItemOn", at = @At("RETURN"))
+    private void pal$onInteractBlock(LocalPlayer player, InteractionHand hand, BlockHitResult hitResult,
+                                     CallbackInfoReturnable<InteractionResult> cir) {
+        if (!cir.getReturnValue().consumesAction()) return;
 
-        ItemStack stack = player.getStackInHand(hand);
+        ItemStack stack = player.getItemInHand(hand);
         if (!(stack.getItem() instanceof BlockItem blockItem)) return;
 
         BlockPos target = hitResult.getBlockPos();
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.world != null && !client.world.getBlockState(target).isReplaceable()) {
-            target = target.offset(hitResult.getSide());
+        Minecraft client = Minecraft.getInstance();
+        if (client.level != null && !client.level.getBlockState(target).canBeReplaced()) {
+            target = target.relative(hitResult.getDirection());
         }
 
-        PlayerActionLogger.onBlockPlaced(blockItem.getBlock().getDefaultState(), target);
+        PlayerActionLogger.onBlockPlaced(blockItem.getBlock().defaultBlockState(), target);
     }
 }

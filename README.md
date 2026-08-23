@@ -37,11 +37,14 @@ observe and comment on gameplay based on the log.
 Versions live side by side in this repository rather than on separate branches, so you can build
 any of them from one checkout:
 
-| Folder | Minecraft | Mappings | Mod version | State |
-|---|---|---|---|---|
-| [`26.1.2/`](26.1.2/) | 26.1.2 | none — 26.1 ships unobfuscated | 2.2.0 | Current |
-| [`1.21.11/`](1.21.11/) | 1.21.11 | Mojang official | 2.2.0 | Current, same feature set |
-| [`1.21.1/`](1.21.1/) | 1.21.1 | Yarn | 2.0.0 | **Behind** — see the note below |
+| Folder | Minecraft | Mappings | Mod version |
+|---|---|---|---|
+| [`26.1.2/`](26.1.2/) | 26.1.2 | none — 26.1 ships unobfuscated | 2.2.0 |
+| [`1.21.11/`](1.21.11/) | 1.21.11 | Mojang official | 2.2.0 |
+| [`1.21.1/`](1.21.1/) | 1.21.1 | Mojang official | 2.2.0 |
+
+**All three are the same mod.** One version number means one feature set, so a jar labelled
+2.2.0 behaves the same whichever game it is for.
 
 Each folder is a self-contained Gradle project:
 
@@ -54,17 +57,35 @@ Jars are named **`PAL-<Loader>_<Minecraft version>-<mod version>.jar`**, because
 of this mod now end up in the same downloads folder and `PAL-2.2.0.jar` said nothing about which
 game it was for.
 
-**Why 1.21.11 uses Mojang's mappings.** 1.21.11 is the last release Yarn covers, so either would
-work — but 26.1 is unobfuscated and therefore uses Mojang's own names. Building 1.21.11 the same
-way keeps one source tree instead of two translations of it: porting the whole mod across took
-exactly **one** change, `getDefaultClockTime()` → `getDayTime()`. Every mixin target — including
-the private `advancement` field and the `hurtServer` hook — is identical in both.
+### One source tree, not three
 
-**1.21.1 is a version behind.** It is the original Yarn build, and predates the live state file,
-the vanilla-statistics reader, the death history and the Fire Resistance fix. 1.21.1 also sits
-before several Minecraft refactors the newer code relies on (`hurtServer`, the equipment split in
-`Inventory`), so bringing it up to date is a real port rather than a copy. It still builds and
-still works as it did.
+Every folder is built against **Mojang's official names**, including the two versions Yarn still
+covers. Yarn would work there, but 26.1 is unobfuscated and so already uses Mojang's names — and
+a mod written twice in two naming schemes is a mod where a fix lands in one copy and is forgotten
+in the other.
+
+The result is that the three sources are nearly the same files. Measured:
+
+- **26.1.2 → 1.21.11:** one line. `getDefaultClockTime()` became `getDayTime()`.
+- **1.21.11 → 1.21.1:** 65 lines across 8 files, and every one is a real Minecraft change
+  between those releases rather than a naming difference:
+
+| What changed | 1.21.1 | 1.21.11 and later |
+|---|---|---|
+| Registry id class | `ResourceLocation` | `Identifier` |
+| Toast host class | `ToastComponent` | `ToastManager` |
+| Damage hook | `hurt(source, amount)` | `hurtServer(level, source, amount)` |
+| Death screen constructor | `(Component, boolean)` | `(Component, boolean, LocalPlayer)` |
+| Inventory backpack | the public `items` list | `getNonEquipmentItems()` |
+| Game profile | a class, `getName()` | a record, `name()` |
+
+Nothing was dropped to make 1.21.1 fit: the live state file, the vanilla statistics, the death
+history and the Fire Resistance fix are all there.
+
+**Mixin targets are verified, not assumed.** Every `@Inject`, `@Shadow` and `@Accessor` in the
+1.21.1 and 1.21.11 builds resolves to a real obfuscated member at compile time — the generated
+`playeractionlogger.refmap.json` names all nine. That is what catches a hook that silently stops
+matching, which is how an earlier port reached the game and crashed on a renamed field.
 
 ---
 

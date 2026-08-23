@@ -1,13 +1,13 @@
 package com.gigachad.pal.util;
 
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.EntityType;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
-import net.minecraft.registry.Registries;
-import net.minecraft.util.Identifier;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
 
 /**
  * Names derived from registry IDs, never from the translated display name.
@@ -20,20 +20,20 @@ import net.minecraft.util.Identifier;
 public final class Names {
     private Names() {}
 
-    public static Identifier id(Block block) {
-        return Registries.BLOCK.getId(block);
+    public static ResourceLocation id(Block block) {
+        return BuiltInRegistries.BLOCK.getKey(block);
     }
 
-    public static Identifier id(Item item) {
-        return Registries.ITEM.getId(item);
+    public static ResourceLocation id(Item item) {
+        return BuiltInRegistries.ITEM.getKey(item);
     }
 
-    public static Identifier id(EntityType<?> type) {
-        return Registries.ENTITY_TYPE.getId(type);
+    public static ResourceLocation id(EntityType<?> type) {
+        return BuiltInRegistries.ENTITY_TYPE.getKey(type);
     }
 
     /** {@code minecraft:diamond_ore} -> {@code diamond_ore}. Use this for matching. */
-    public static String path(Identifier identifier) {
+    public static String path(ResourceLocation identifier) {
         return identifier.getPath();
     }
 
@@ -50,7 +50,7 @@ public final class Names {
     }
 
     /** {@code diamond_ore} -> {@code Diamond Ore}. Always English, for the log message itself. */
-    public static String readable(Identifier identifier) {
+    public static String readable(ResourceLocation identifier) {
         return prettify(identifier.getPath());
     }
 

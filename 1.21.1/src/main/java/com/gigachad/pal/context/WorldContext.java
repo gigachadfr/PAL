@@ -1,11 +1,11 @@
 package com.gigachad.pal.context;
 
 import com.gigachad.pal.util.Names;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.client.world.ClientWorld;
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.util.Identifier;
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.level.Level;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.core.BlockPos;
 
 /**
  * Immutable snapshot of "where and when" the player is — biome, time, weather, dimension,
@@ -21,15 +21,15 @@ public record WorldContext(
         int y,
         boolean skyVisible
 ) {
-    public static WorldContext of(ClientPlayerEntity player) {
-        ClientWorld world = player.clientWorld;
-        BlockPos pos = player.getBlockPos();
-        boolean sky = world.isSkyVisible(pos);
+    public static WorldContext of(LocalPlayer player) {
+        Level world = player.level();
+        BlockPos pos = player.blockPosition();
+        boolean sky = world.canSeeSky(pos);
         int y = pos.getY();
 
         return new WorldContext(
-                describeDimension(world.getRegistryKey()),
-                describePhase(world.getTimeOfDay()),
+                describeDimension(world.dimension()),
+                describePhase(world.getDayTime()),
                 describeWeather(world),
                 describeBiome(world, pos),
                 describeAltitude(y, sky),
@@ -37,8 +37,8 @@ public record WorldContext(
                 sky);
     }
 
-    private static String describeDimension(RegistryKey<net.minecraft.world.World> key) {
-        String path = key.getValue().getPath();
+    private static String describeDimension(ResourceKey<net.minecraft.world.level.Level> key) {
+        String path = key.location().getPath();
         return switch (path) {
             case "overworld" -> "the Overworld";
             case "the_nether" -> "the Nether";
@@ -56,14 +56,14 @@ public record WorldContext(
         return "night";
     }
 
-    private static String describeWeather(ClientWorld world) {
+    private static String describeWeather(Level world) {
         if (world.isThundering()) return "thunderstorm";
         if (world.isRaining()) return "raining";
         return "clear";
     }
 
-    private static String describeBiome(ClientWorld world, BlockPos pos) {
-        Identifier id = world.getBiome(pos).getKey().map(RegistryKey::getValue).orElse(null);
+    private static String describeBiome(Level world, BlockPos pos) {
+        ResourceLocation id = world.getBiome(pos).unwrapKey().map(ResourceKey::location).orElse(null);
         return id == null ? "unknown" : Names.readable(id);
     }
 

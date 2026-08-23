@@ -3,15 +3,15 @@ package com.gigachad.pal.tracker;
 import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
 import com.gigachad.pal.util.Names;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.entity.player.PlayerInventory;
-import net.minecraft.item.ItemStack;
-import net.minecraft.registry.Registries;
-import net.minecraft.screen.PlayerScreenHandler;
-import net.minecraft.screen.ScreenHandler;
-import net.minecraft.screen.ScreenHandlerType;
-import net.minecraft.screen.slot.Slot;
-import net.minecraft.util.Identifier;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.world.inventory.InventoryMenu;
+import net.minecraft.world.inventory.AbstractContainerMenu;
+import net.minecraft.world.inventory.MenuType;
+import net.minecraft.world.inventory.Slot;
+import net.minecraft.resources.ResourceLocation;
 
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -56,11 +56,11 @@ public class ContainerTracker implements Tracker {
     private String containerName;
     private Map<String, Integer> playerBefore;
     private Map<String, Integer> containerBefore;
-    private ScreenHandler handler;
+    private AbstractContainerMenu handler;
     private long openedAt;
 
     @Override
-    public void onSessionStart(ClientPlayerEntity player, EventLog log) {
+    public void onSessionStart(LocalPlayer player, EventLog log) {
         reset();
     }
 
@@ -72,9 +72,9 @@ public class ContainerTracker implements Tracker {
     }
 
     /** Called from {@code MinecraftClientMixin} when a container screen opens. */
-    public void onOpen(ScreenHandler screenHandler, ClientPlayerEntity player) {
+    public void onOpen(AbstractContainerMenu screenHandler, LocalPlayer player) {
         // The player's own inventory is not a container worth narrating.
-        if (screenHandler instanceof PlayerScreenHandler) {
+        if (screenHandler instanceof InventoryMenu) {
             reset();
             return;
         }
@@ -87,7 +87,7 @@ public class ContainerTracker implements Tracker {
     }
 
     /** Called from {@code MinecraftClientMixin} when the container screen closes. */
-    public void onClose(ClientPlayerEntity player, EventLog log) {
+    public void onClose(LocalPlayer player, EventLog log) {
         if (containerName == null || playerBefore == null) return;
 
         Map<String, Integer> playerAfter = snapshotInventory(player.getInventory());
@@ -142,14 +142,14 @@ public class ContainerTracker implements Tracker {
     }
 
     /** Contents of the container's own slots, i.e. every slot that is not the player's. */
-    private static Map<String, Integer> snapshotContainer(ScreenHandler handler,
-                                                          ClientPlayerEntity player) {
+    private static Map<String, Integer> snapshotContainer(AbstractContainerMenu handler,
+                                                          LocalPlayer player) {
         Map<String, Integer> counts = new HashMap<>();
         if (handler == null) return counts;
 
         for (Slot slot : handler.slots) {
-            if (slot.inventory == player.getInventory()) continue;
-            ItemStack stack = slot.getStack();
+            if (slot.container == player.getInventory()) continue;
+            ItemStack stack = slot.getItem();
             if (stack.isEmpty()) continue;
             counts.merge(Names.readable(stack), stack.getCount(), Integer::sum);
         }
@@ -162,25 +162,25 @@ public class ContainerTracker implements Tracker {
         sb.setLength(sb.length() - 2);
     }
 
-    private static Map<String, Integer> snapshotInventory(PlayerInventory inventory) {
+    private static Map<String, Integer> snapshotInventory(Inventory inventory) {
         Map<String, Integer> counts = new HashMap<>();
-        for (int i = 0; i < inventory.size(); i++) {
-            ItemStack stack = inventory.getStack(i);
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            ItemStack stack = inventory.getItem(i);
             if (stack.isEmpty()) continue;
             counts.merge(Names.readable(stack), stack.getCount(), Integer::sum);
         }
         return counts;
     }
 
-    private static String describe(ScreenHandler handler) {
-        ScreenHandlerType<?> type;
+    private static String describe(AbstractContainerMenu handler) {
+        MenuType<?> type;
         try {
             type = handler.getType();
         } catch (UnsupportedOperationException e) {
             return "container"; // the player's own inventory has no registered type
         }
 
-        Identifier id = Registries.SCREEN_HANDLER.getId(type);
+        ResourceLocation id = BuiltInRegistries.MENU.getKey(type);
         if (id == null) return "container";
 
         String path = id.getPath();

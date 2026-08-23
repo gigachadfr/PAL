@@ -31,7 +31,9 @@ loom {
 dependencies {
     // Minecraft
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    // Mojang's official names, not Yarn. All three builds in this repository share one
+    // source tree, and that only works if they all speak the same names.
+    mappings loom.officialMojangMappings()
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 
     // Fabric API

@@ -3,16 +3,16 @@ package com.gigachad.pal.tracker;
 import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
 import com.gigachad.pal.util.Names;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.entity.Entity;
-import net.minecraft.entity.LivingEntity;
-import net.minecraft.entity.mob.HostileEntity;
-import net.minecraft.entity.passive.PassiveEntity;
-import net.minecraft.entity.player.PlayerEntity;
-import net.minecraft.entity.projectile.ProjectileUtil;
-import net.minecraft.util.hit.EntityHitResult;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.Vec3d;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.monster.Monster;
+import net.minecraft.world.entity.AgeableMob;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.projectile.ProjectileUtil;
+import net.minecraft.world.phys.EntityHitResult;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -39,14 +39,14 @@ public class LookTracker implements Tracker {
     private boolean reported = false;
 
     @Override
-    public void onSessionStart(ClientPlayerEntity player, EventLog log) {
+    public void onSessionStart(LocalPlayer player, EventLog log) {
         lastReported.clear();
         currentId = -1;
         reported = false;
     }
 
     @Override
-    public void tick(ClientPlayerEntity player, EventLog log, long tick) {
+    public void tick(LocalPlayer player, EventLog log, long tick) {
         if (tick % CHECK_EVERY_TICKS != 0) return;
 
         Entity target = raycastEntity(player);
@@ -74,17 +74,17 @@ public class LookTracker implements Tracker {
         if (previous != null && now - previous < REPEAT_MS) return;
         lastReported.put(name, now);
 
-        double distance = Math.sqrt(target.squaredDistanceTo(player));
+        double distance = Math.sqrt(target.distanceToSqr(player));
         log.log(Level.INFO, "looking_at", describe(target, name, distance));
     }
 
     private static String describe(Entity target, String name, double distance) {
         String how;
-        if (target instanceof HostileEntity) {
+        if (target instanceof Monster) {
             how = "Eyeing";
-        } else if (target instanceof PlayerEntity) {
+        } else if (target instanceof Player) {
             how = "Staring at";
-        } else if (target instanceof PassiveEntity) {
+        } else if (target instanceof AgeableMob) {
             how = "Staring at";
         } else {
             how = "Looking at";
@@ -100,13 +100,13 @@ public class LookTracker implements Tracker {
      * Single raycast down the crosshair. Cheaper than the old approach of scanning every entity
      * in a 128-block box and raycasting to each one.
      */
-    private static Entity raycastEntity(ClientPlayerEntity player) {
-        Vec3d eye = player.getEyePos();
-        Vec3d direction = player.getRotationVec(1.0f);
-        Vec3d end = eye.add(direction.multiply(RANGE));
-        Box box = player.getBoundingBox().stretch(direction.multiply(RANGE)).expand(1.0);
+    private static Entity raycastEntity(LocalPlayer player) {
+        Vec3 eye = player.getEyePosition();
+        Vec3 direction = player.getViewVector(1.0f);
+        Vec3 end = eye.add(direction.scale(RANGE));
+        AABB box = player.getBoundingBox().expandTowards(direction.scale(RANGE)).inflate(1.0);
 
-        EntityHitResult hit = ProjectileUtil.raycast(
+        EntityHitResult hit = ProjectileUtil.getEntityHitResult(
                 player, eye, end, box,
                 entity -> entity instanceof LivingEntity && entity.isAlive() && !entity.isSpectator(),
                 RANGE * RANGE);

@@ -3,9 +3,9 @@ package com.gigachad.pal.tracker;
 import com.gigachad.pal.log.EventLog;
 import com.gigachad.pal.log.Level;
 import com.gigachad.pal.util.Names;
-import net.minecraft.block.BlockState;
-import net.minecraft.client.network.ClientPlayerEntity;
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.core.BlockPos;
 
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -40,14 +40,14 @@ public class MiningTracker implements Tracker {
     private int oresThisSession;
 
     @Override
-    public void onSessionStart(ClientPlayerEntity player, EventLog log) {
+    public void onSessionStart(LocalPlayer player, EventLog log) {
         session.clear();
         seenOres.clear();
         active = false;
         oresThisSession = 0;
     }
 
-    /** Called from {@code ClientPlayerInteractionManagerMixin}. */
+    /** Called from {@code MultiPlayerGameModeMixin}. */
     public void onBlockBroken(BlockState state, BlockPos pos, EventLog log) {
         String path = Names.blockPath(state);
         long now = System.currentTimeMillis();
@@ -79,7 +79,7 @@ public class MiningTracker implements Tracker {
     }
 
     @Override
-    public void tick(ClientPlayerEntity player, EventLog log, long tick) {
+    public void tick(LocalPlayer player, EventLog log, long tick) {
         if (!active || tick % 10 != 0) return;
 
         long now = System.currentTimeMillis();
