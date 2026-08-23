@@ -13,16 +13,21 @@ Logs what the local player does to a JSONL file, for LLM commentary. Client-side
 singleplayer and on servers, and only ever logs your own player.
 '''
 
-# Client-side only. Declared so joining a server that does not have the mod is never refused on
-# its account, which is the whole point of a logger that reads only what your own client sees.
-[[mods.dependencies.playeractionlogger]]
+# Client-side only. `side = "CLIENT"` is what stops a server demanding this mod of a joining
+# client — the whole point of a logger that reads only what your own client sees.
+#
+# The table is `[[dependencies.<modid>]]` at the root, NOT `[[mods.dependencies.<modid>]]`. The
+# nested spelling parses as valid TOML and is silently ignored, so the mod still loads while
+# every constraint here quietly does nothing — including the CLIENT side. It also leaves nothing
+# for Modrinth to read, which is how a release landed there with no loader and no game version.
+[[dependencies.playeractionlogger]]
 modId = "neoforge"
 type = "required"
 versionRange = "[21.1,)"
 ordering = "NONE"
 side = "CLIENT"
 
-[[mods.dependencies.playeractionlogger]]
+[[dependencies.playeractionlogger]]
 modId = "minecraft"
 type = "required"
 versionRange = "[1.21.1,1.21.2)"
